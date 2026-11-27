@@ -95,6 +95,8 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "lowQuotaThresholdRemainingPercent",
   "duplicateCooldownMinutes",
   "nativeQuotaNotifications",
+  "usageImport.claudeCode",
+  "usageImport.codex",
   "opencodeGoWindows",
   "opencodeMonthlyLimit",
   "dashboard.hiddenCards",
@@ -406,6 +408,10 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
           providerError: { ...config.nativeQuotaNotifications.providerError },
           duplicateCooldownMinutes: config.nativeQuotaNotifications.duplicateCooldownMinutes,
         };
+      case "usageImport.claudeCode":
+        return config.usageImport.claudeCode;
+      case "usageImport.codex":
+        return config.usageImport.codex;
       case "opencodeGoWindows":
         return [...config.opencodeGoWindows];
       case "opencodeMonthlyLimit":
@@ -649,6 +655,12 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
           providerError: { ...value.providerError },
           duplicateCooldownMinutes: value.duplicateCooldownMinutes,
         };
+      case "usageImport.claudeCode":
+      case "usageImport.codex":
+        if (value !== true && value !== false) {
+          throw invalidSetting(key, "expected boolean");
+        }
+        return value;
       case "opencodeGoWindows":
         if (!isValidOpenCodeGoWindows(value)) {
           throw invalidSetting(

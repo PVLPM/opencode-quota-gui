@@ -13,8 +13,8 @@ import {
   hashUsageImport,
   listJsonlFiles,
   readIncrementalJsonlFile,
+  readJsonlFilesWithBudget,
   type UsageImportTokens,
-  usageImportFileKey,
 } from "./usage-import.js";
 
 /**
@@ -66,6 +66,8 @@ export interface ClaudeHistoryReadInput {
   /** Claude config directory. The resolver below derives it from CLAUDE_CONFIG_DIR or home. */
   root?: string;
   cursor?: ClaudeCodeImportCursor;
+  /** Per-run byte budget; unread files keep their prior cursor. */
+  maxBytes?: number;
 }
 
 export interface ClaudeCodeParsedLine {
@@ -227,26 +229,27 @@ export async function readClaudeCodeHistory(
 
   const paths = (await listJsonlFiles(join(input.root, "projects"))) ?? [];
   const candidates = new Map<string, ClaudeCandidate>();
-  const nextFiles: Record<string, ClaudeCodeFileCursor> = {};
-
-  for (const path of paths.sort()) {
-    const key = usageImportFileKey(path);
-    const cursor = await readIncrementalJsonlFile<ClaudeCodeFileCursor, undefined>({
-      path,
-      prior: previous.files[key],
-      state: () => undefined,
-      onLine: (line) => {
-        const parsed = parseClaudeCodeLine(line);
-        if (parsed !== undefined) mergeCandidate(candidates, parsed);
-      },
-      toCursor: (_state, stats, byteOffset) => ({
-        size: stats.size,
-        mtimeMs: stats.mtimeMs,
-        byteOffset,
+  const nextFiles = await readJsonlFilesWithBudget<ClaudeCodeFileCursor>({
+    paths: paths.sort(),
+    previous: previous.files,
+    ...(input.maxBytes !== undefined ? { maxBytes: input.maxBytes } : {}),
+    read: (path, prior, budget) =>
+      readIncrementalJsonlFile<ClaudeCodeFileCursor, undefined>({
+        path,
+        prior,
+        state: () => undefined,
+        onLine: (line) => {
+          const parsed = parseClaudeCodeLine(line);
+          if (parsed !== undefined) mergeCandidate(candidates, parsed);
+        },
+        toCursor: (_state, stats, byteOffset) => ({
+          size: stats.size,
+          mtimeMs: stats.mtimeMs,
+          byteOffset,
+        }),
+        ...(budget !== undefined ? { budget } : {}),
       }),
-    });
-    if (cursor !== undefined) nextFiles[key] = cursor;
-  }
+  });
 
   const parentReplayKeys = new Set(previous.parentReplayKeys);
   for (const candidate of candidates.values()) {

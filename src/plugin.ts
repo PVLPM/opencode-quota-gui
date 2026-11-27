@@ -364,10 +364,16 @@ export const QuotaToastPlugin = Plugin.define({
         at,
       );
     };
+    // Declared before the tracker so its callback can reach the dashboard
+    // runtime's import exclusion sink once the host has bound.
+    let dashboardLease: DashboardLease | undefined;
     const claudeTtl = createClaudeAgentTtlTracker({
       directory: ctx.location.directory,
       read: readClaudeObservedTtl,
       emit: emitCacheObserverEvent,
+      onNativeIds: (sessionId, messageId) => {
+        dashboardLease?.runtime?.usage?.recordClaudeOwnership(sessionId, messageId);
+      },
     });
     // Reuse the existing host stream for credential invalidation and narrowly projected cache
     // evidence. No Native-side OpenCode event subscription is opened.
@@ -456,7 +462,6 @@ export const QuotaToastPlugin = Plugin.define({
     // lease (spec §4.3). The first owner workspace supplies the config import root, and the
     // settings store reads the global canonical config. Binding is all that happens here; the
     // first snapshot is computed on the first request.
-    let dashboardLease: DashboardLease | undefined;
     try {
       // Older hosts may not supply `ctx.app` at runtime; an absent or empty
       // version lets the lifecycle use its bounded `opencode --version` probe.

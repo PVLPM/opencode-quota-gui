@@ -10,11 +10,19 @@
  * idempotently collapse the same measurement. A unique index cannot model
  * aggregated runs: a split leaves two rows sharing an endpoint.
  */
-import type { AccountingUnit } from "../contracts/dashboard.js";
+import type { AccountingMetric, AccountingUnit, CostedTokens } from "../contracts/dashboard.js";
 import type { UsageMeasurementKind, UsageSource } from "../contracts/usage.js";
+import type {
+  UsageActivityEntry,
+  UsageActivityQuery,
+  UsageActivityResult,
+} from "../contracts/usage-activity.js";
 import { openOpenCodeSqliteWritable, type WritableSqliteConn } from "./opencode-sqlite.js";
+import { type PricingResolution, priceTokenBuckets } from "./quota-stats.js";
+import { type TokenBuckets, totalTokenBuckets } from "./token-buckets.js";
+import type { UsageImportTokens, UsageResetPrecision } from "./usage-import.js";
 
-export const USAGE_HISTORY_SCHEMA_VERSION = 1;
+export const USAGE_HISTORY_SCHEMA_VERSION = 3;
 
 const MIGRATIONS: readonly string[] = [
   `
@@ -68,6 +76,40 @@ const MIGRATIONS: readonly string[] = [
   CREATE INDEX usage_interruptions_card ON usage_interruptions(card_id, last_at_ms);
   CREATE INDEX usage_interruptions_time ON usage_interruptions(last_at_ms);
   `,
+  `
+  CREATE TABLE usage_import_invocations (
+    harness TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    effort TEXT,
+    input_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    reasoning_tokens INTEGER NOT NULL,
+    session_key TEXT,
+    thread_key TEXT,
+    account_hint TEXT,
+    PRIMARY KEY (harness, dedupe_key)
+  );
+  CREATE INDEX usage_import_invocations_time ON usage_import_invocations(at_ms);
+
+  CREATE TABLE usage_import_invocation_keys (
+    harness TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL,
+    message_key TEXT NOT NULL,
+    PRIMARY KEY (harness, dedupe_key, message_key)
+  );
+  CREATE INDEX usage_import_invocation_keys_key ON usage_import_invocation_keys(message_key);
+
+  CREATE TABLE usage_import_exclusions (
+    exclusion_key TEXT PRIMARY KEY
+  );
+  `,
+  `
+  ALTER TABLE usage_runs ADD COLUMN reset_precision TEXT;
+  `,
 ];
 
 export const USAGE_INTERRUPTION_KINDS = ["error", "cooldown", "retained", "missing-row"] as const;
@@ -102,6 +144,8 @@ export interface UsageStoredRun {
   remainingPercent: number;
   quantity?: { decimal: string; unit: AccountingUnit };
   resetAtMs?: number;
+  /** `exact` when the provider supplied the reset instant, `estimated` when derived. */
+  reset_precision?: UsageResetPrecision;
   /** Evidence of continuous observation from the preceding run. */
   linked: boolean;
 }
@@ -121,6 +165,7 @@ export interface UsageCycleSample {
   remainingPercent: number;
   quantity?: { decimal: string; unit: AccountingUnit };
   resetAtMs?: number;
+  resetPrecision?: UsageResetPrecision;
   measuredAtMs: number;
 }
 
@@ -153,11 +198,67 @@ export interface UsageHistorySlice {
   interruptions: UsageInterruptionRecord[];
 }
 
+export const USAGE_IMPORT_HARNESSES = ["claude-code", "codex"] as const;
+export type UsageImportHarness = (typeof USAGE_IMPORT_HARNESSES)[number];
+export type UsageImportStatusKind = "ok" | "unavailable" | "error";
+
+/** Persisted per-harness importer state; opaque cursors stay JSON text. */
+export interface UsageImportState {
+  cursor?: string;
+  lastImportedAtMs?: number;
+  status?: UsageImportStatusKind;
+  enabled?: boolean;
+}
+
+/** One imported invocation, already stripped to numbers and hashed ids. */
+export interface UsageImportedInvocation {
+  atMs: number;
+  model: string;
+  effort?: string;
+  tokens: UsageImportTokens;
+  dedupeKey: string;
+  nativeSessionKey?: string;
+  nativeMessageKeys?: readonly string[];
+  threadKey?: string;
+  accountHint?: string;
+}
+
+/** One imported Codex rate-limit reading for one window. */
+export interface UsageImportedCodexRateLimit {
+  atMs: number;
+  window: "primary" | "secondary";
+  windowMinutes?: number;
+  usedPercent: number;
+  resetsAtMs?: number;
+  /** `exact` for a provider-supplied reset instant, `estimated` for an offset. */
+  resetPrecision?: UsageResetPrecision;
+  planType?: string;
+  limitId?: string;
+  /** Hashed account hint; absent means "unknown". */
+  accountHint?: string;
+}
+
 export interface UsageStore {
   readonly path: string;
   /** One full collector cycle; synchronous and single-transaction. */
   recordCycle(observation: UsageCycleObservation): void;
   query(span: { startMs: number; endMs: number }): UsageHistorySlice;
+  /** Upsert imported invocations; counters take the per-counter maximum. */
+  recordImportedInvocations(
+    harness: UsageImportHarness,
+    invocations: readonly UsageImportedInvocation[],
+  ): void;
+  /** Write Codex rate-limit readings as `codex-import` series runs. */
+  recordCodexRateLimitObservations(observations: readonly UsageImportedCodexRateLimit[]): void;
+  /** Hash-only cross-harness exclusion set; Claude Code session/message keys. */
+  addImportExclusionKeys(keys: readonly string[]): void;
+  getImportState(harness: UsageImportHarness): UsageImportState | undefined;
+  setImportState(harness: UsageImportHarness, state: UsageImportState): void;
+  /** Priced imported activity, aligned with the given query intervals. */
+  queryImportedActivity(
+    query: UsageActivityQuery,
+    harnesses: readonly UsageImportHarness[],
+  ): UsageActivityResult;
   close(): void;
 }
 
@@ -187,6 +288,7 @@ interface RunRow {
   quantity_decimal: string | null;
   quantity_unit_json: string | null;
   reset_at_ms: number | null;
+  reset_precision: string | null;
   linked: number;
   collector_run_id: string;
   collector_session_id: string;
@@ -204,7 +306,7 @@ interface InterruptionRow {
 }
 
 const RUN_COLUMNS =
-  "run_id, series_id, first_at_ms, last_at_ms, sample_count, remaining_percent, quantity_decimal, quantity_unit_json, reset_at_ms, linked, collector_run_id, collector_session_id, collector_interval_ms";
+  "run_id, series_id, first_at_ms, last_at_ms, sample_count, remaining_percent, quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, linked, collector_run_id, collector_session_id, collector_interval_ms";
 
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => "?").join(", ");
@@ -240,6 +342,9 @@ function runRowToStored(row: RunRow): UsageStoredRun {
       ? { quantity: { decimal: row.quantity_decimal, unit: JSON.parse(row.quantity_unit_json) } }
       : {}),
     ...(row.reset_at_ms !== null ? { resetAtMs: row.reset_at_ms } : {}),
+    ...(row.reset_precision === "exact" || row.reset_precision === "estimated"
+      ? { reset_precision: row.reset_precision }
+      : {}),
     linked: row.linked === 1,
   };
 }
@@ -248,6 +353,59 @@ function quantityParts(
   quantity: { decimal: string; unit: AccountingUnit } | undefined,
 ): [string | null, string | null] {
   return quantity === undefined ? [null, null] : [quantity.decimal, JSON.stringify(quantity.unit)];
+}
+
+const CODEX_IMPORT_PROVIDER = "openai";
+const CODEX_IMPORT_PROVIDER_LABEL = "OpenAI Codex (imported)";
+const IMPORT_PROVIDER_BY_HARNESS: Readonly<Record<UsageImportHarness, string>> = {
+  "claude-code": "anthropic",
+  codex: "openai",
+};
+const CODEX_WINDOW_SEMANTICS: Partial<
+  Record<number, { window: "five_hour" | "week"; label: string }>
+> = {
+  300: { window: "five_hour", label: "5h" },
+  10080: { window: "week", label: "Week" },
+};
+
+/** A bounded safe token for labels and row keys; raw strings are never needed. */
+function importToken(value: string | undefined, fallback: string): string {
+  const safe = (value ?? "")
+    .trim()
+    .replace(/[^A-Za-z0-9_.:-]+/g, "_")
+    .slice(0, 64)
+    .replace(/^_+|_+$/g, "");
+  return safe.length > 0 ? safe : fallback;
+}
+
+function codexWindowIdentity(observation: UsageImportedCodexRateLimit): {
+  rowKey: string;
+  metric: AccountingMetric;
+  label: string;
+} {
+  const exact =
+    observation.windowMinutes === undefined
+      ? undefined
+      : CODEX_WINDOW_SEMANTICS[observation.windowMinutes];
+  if (exact !== undefined) {
+    return {
+      rowKey: `window:${exact.window}`,
+      metric: { kind: "window", window: exact.window },
+      label: exact.label,
+    };
+  }
+  const limit = importToken(observation.limitId, "codex");
+  const suffix = observation.windowMinutes === undefined ? "" : `${observation.windowMinutes}m`;
+  const name = `${limit}|${observation.window}|${observation.windowMinutes ?? ""}`;
+  return {
+    rowKey: `named:${name}`,
+    metric: { kind: "named", name },
+    label: [limit, observation.window, suffix].filter((part) => part.length > 0).join(" "),
+  };
+}
+
+function counter(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
 
 function sameMeasurement(
@@ -372,9 +530,9 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     conn.run(
       `INSERT INTO usage_runs (
          series_id, first_at_ms, last_at_ms, sample_count, remaining_percent,
-         quantity_decimal, quantity_unit_json, reset_at_ms, linked,
+         quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, linked,
          collector_run_id, collector_session_id, collector_interval_ms
-       ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sample.series.rowId,
         measuredAtMs,
@@ -383,6 +541,7 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         decimal,
         unitJson,
         sample.resetAtMs ?? null,
+        sample.resetPrecision ?? null,
         linked ? 1 : 0,
         run.collectorRunId,
         run.collectorSessionId,
@@ -444,9 +603,9 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     conn.run(
       `INSERT INTO usage_runs (
          series_id, first_at_ms, last_at_ms, sample_count, remaining_percent,
-         quantity_decimal, quantity_unit_json, reset_at_ms, linked,
+         quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, linked,
          collector_run_id, collector_session_id, collector_interval_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       [
         covering.series_id,
         measuredAtMs,
@@ -456,6 +615,7 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         covering.quantity_decimal,
         covering.quantity_unit_json,
         covering.reset_at_ms,
+        covering.reset_precision,
         covering.collector_run_id,
         covering.collector_session_id,
         covering.collector_interval_ms,
@@ -628,6 +788,353 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     }
   }
 
+  function recordImportedInvocations(
+    harness: UsageImportHarness,
+    invocations: readonly UsageImportedInvocation[],
+  ): void {
+    if (invocations.length === 0) return;
+    conn.exec("BEGIN IMMEDIATE");
+    try {
+      for (const invocation of invocations) {
+        if (!Number.isFinite(invocation.atMs)) continue;
+        const tokens = invocation.tokens;
+        const atMs = Math.round(invocation.atMs);
+        conn.run(
+          `INSERT INTO usage_import_invocations (
+             harness, dedupe_key, at_ms, model, effort,
+             input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
+             session_key, thread_key, account_hint
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(harness, dedupe_key) DO UPDATE SET
+             at_ms = MIN(usage_import_invocations.at_ms, excluded.at_ms),
+             model = CASE
+               WHEN usage_import_invocations.model = 'unknown' AND excluded.model <> 'unknown'
+                 THEN excluded.model
+               ELSE usage_import_invocations.model
+             END,
+             effort = COALESCE(usage_import_invocations.effort, excluded.effort),
+             input_tokens = MAX(usage_import_invocations.input_tokens, excluded.input_tokens),
+             cache_read_tokens = MAX(usage_import_invocations.cache_read_tokens, excluded.cache_read_tokens),
+             cache_write_tokens = MAX(usage_import_invocations.cache_write_tokens, excluded.cache_write_tokens),
+             output_tokens = MAX(usage_import_invocations.output_tokens, excluded.output_tokens),
+             reasoning_tokens = MAX(usage_import_invocations.reasoning_tokens, excluded.reasoning_tokens),
+             session_key = COALESCE(usage_import_invocations.session_key, excluded.session_key),
+             thread_key = COALESCE(usage_import_invocations.thread_key, excluded.thread_key),
+             account_hint = COALESCE(usage_import_invocations.account_hint, excluded.account_hint)`,
+          [
+            harness,
+            invocation.dedupeKey,
+            atMs,
+            invocation.model.trim().slice(0, 200) || "unknown",
+            invocation.effort === undefined ? null : invocation.effort.trim().slice(0, 64) || null,
+            counter(tokens.input),
+            counter(tokens.cacheRead),
+            counter(tokens.cacheWrite),
+            counter(tokens.output),
+            counter(tokens.reasoning),
+            invocation.nativeSessionKey ?? null,
+            invocation.threadKey ?? null,
+            invocation.accountHint ?? null,
+          ],
+        );
+        for (const messageKey of invocation.nativeMessageKeys ?? []) {
+          conn.run(
+            `INSERT OR IGNORE INTO usage_import_invocation_keys (harness, dedupe_key, message_key)
+             VALUES (?, ?, ?)`,
+            [harness, invocation.dedupeKey, messageKey],
+          );
+        }
+      }
+      conn.exec("COMMIT");
+    } catch (error) {
+      try {
+        conn.exec("ROLLBACK");
+      } catch {
+        // the original failure is the one worth reporting
+      }
+      throw error;
+    }
+  }
+
+  function recordCodexRateLimitObservations(
+    observations: readonly UsageImportedCodexRateLimit[],
+  ): void {
+    const samples: UsageCycleSample[] = [];
+    for (const observation of observations) {
+      if (!Number.isFinite(observation.atMs) || !Number.isFinite(observation.usedPercent)) continue;
+      const atMs = Math.round(observation.atMs);
+      const cardId = `codex-import:${observation.accountHint ?? "unknown"}`;
+      const identity = codexWindowIdentity(observation);
+      const planLabel = observation.planType?.trim().slice(0, 100);
+      samples.push({
+        series: {
+          rowId: `${cardId}#${identity.rowKey}`,
+          cardId,
+          rowKey: identity.rowKey,
+          providerId: CODEX_IMPORT_PROVIDER,
+          providerLabel: CODEX_IMPORT_PROVIDER_LABEL,
+          ...(planLabel !== undefined && planLabel.length > 0 ? { planLabel } : {}),
+          label: identity.label,
+          metricJson: JSON.stringify(identity.metric),
+          measurement: "provider-observed",
+          source: "codex-import",
+        },
+        remainingPercent: Math.max(0, Math.min(100, 100 - observation.usedPercent)),
+        ...(observation.resetsAtMs !== undefined && Number.isFinite(observation.resetsAtMs)
+          ? { resetAtMs: Math.round(observation.resetsAtMs) }
+          : {}),
+        ...(observation.resetPrecision !== undefined
+          ? { resetPrecision: observation.resetPrecision }
+          : {}),
+        measuredAtMs: atMs,
+      });
+    }
+    if (samples.length === 0) return;
+    samples.sort((left, right) => left.measuredAtMs - right.measuredAtMs);
+    const lastSample = samples.at(-1);
+    if (lastSample === undefined) return;
+    recordCycle({
+      collectorRunId: "codex-import",
+      collectorSessionId: "codex-import",
+      intervalMs: 0,
+      observedCards: [],
+      providerIds: [],
+      samples,
+      interruptions: [],
+      nowMs: lastSample.measuredAtMs,
+    });
+  }
+
+  function addImportExclusionKeys(keys: readonly string[]): void {
+    const unique = [...new Set(keys.filter((key) => key.length > 0))];
+    if (unique.length === 0) return;
+    conn.exec("BEGIN IMMEDIATE");
+    try {
+      for (const key of unique) {
+        conn.run("INSERT OR IGNORE INTO usage_import_exclusions (exclusion_key) VALUES (?)", [key]);
+      }
+      conn.exec("COMMIT");
+    } catch (error) {
+      try {
+        conn.exec("ROLLBACK");
+      } catch {
+        // the original failure is the one worth reporting
+      }
+      throw error;
+    }
+  }
+
+  function getImportState(harness: UsageImportHarness): UsageImportState | undefined {
+    const row = conn.get<{ value: string }>("SELECT value FROM usage_meta WHERE key = ?", [
+      `import_state:${harness}`,
+    ]);
+    if (row === null) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.value);
+    } catch {
+      return undefined;
+    }
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const value = parsed as Record<string, unknown>;
+    const state: UsageImportState = {};
+    if (typeof value.cursor === "string") state.cursor = value.cursor;
+    if (typeof value.lastImportedAtMs === "number" && Number.isFinite(value.lastImportedAtMs)) {
+      state.lastImportedAtMs = value.lastImportedAtMs;
+    }
+    if (value.status === "ok" || value.status === "unavailable" || value.status === "error") {
+      state.status = value.status;
+    }
+    if (typeof value.enabled === "boolean") state.enabled = value.enabled;
+    return state;
+  }
+
+  function setImportState(harness: UsageImportHarness, state: UsageImportState): void {
+    const value: UsageImportState = {};
+    if (state.cursor !== undefined) value.cursor = state.cursor;
+    if (state.lastImportedAtMs !== undefined && Number.isFinite(state.lastImportedAtMs)) {
+      value.lastImportedAtMs = state.lastImportedAtMs;
+    }
+    if (state.status !== undefined) value.status = state.status;
+    if (state.enabled !== undefined) value.enabled = state.enabled;
+    conn.run(
+      "INSERT INTO usage_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [`import_state:${harness}`, JSON.stringify(value)],
+    );
+  }
+
+  interface ImportedActivityAccumulator {
+    input: number;
+    cacheRead: number;
+    cacheWrite: number;
+    output: number;
+    reasoning: number;
+    costUsd: number;
+    pricedAny: boolean;
+    unpricedTokens: number;
+    unknownTokens: number;
+    stepCount: number;
+  }
+
+  function emptyImportedAccumulator(): ImportedActivityAccumulator {
+    return {
+      input: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      output: 0,
+      reasoning: 0,
+      costUsd: 0,
+      pricedAny: false,
+      unpricedTokens: 0,
+      unknownTokens: 0,
+      stepCount: 0,
+    };
+  }
+
+  function finalizeImportedActivity(accumulator: ImportedActivityAccumulator): CostedTokens {
+    return {
+      input: accumulator.input,
+      cacheRead: accumulator.cacheRead,
+      cacheWrite: accumulator.cacheWrite,
+      output: accumulator.output,
+      reasoning: accumulator.reasoning,
+      total:
+        accumulator.input +
+        accumulator.cacheRead +
+        accumulator.cacheWrite +
+        accumulator.output +
+        accumulator.reasoning,
+      apiEquivalentCostUsd: accumulator.pricedAny ? accumulator.costUsd : null,
+      unpricedTokens: accumulator.unpricedTokens,
+      unknownTokens: accumulator.unknownTokens,
+    };
+  }
+
+  function queryImportedActivity(
+    query: UsageActivityQuery,
+    harnesses: readonly UsageImportHarness[],
+  ): UsageActivityResult {
+    const active = USAGE_IMPORT_HARNESSES.filter((harness) => harnesses.includes(harness));
+    const pricingCache = new Map<string, PricingResolution>();
+    return {
+      intervals: query.intervals.map((interval) => {
+        const groups = new Map<
+          string,
+          ImportedActivityAccumulator & { providerId: string; modelId: string; effort?: string }
+        >();
+        if (active.length > 0) {
+          const rows = conn.all<{
+            harness: string;
+            model: string;
+            effort: string | null;
+            at_ms: number;
+            input_tokens: number;
+            cache_read_tokens: number;
+            cache_write_tokens: number;
+            output_tokens: number;
+            reasoning_tokens: number;
+          }>(
+            `SELECT i.harness, i.model, i.effort, i.at_ms,
+                    i.input_tokens, i.cache_read_tokens, i.cache_write_tokens,
+                    i.output_tokens, i.reasoning_tokens
+             FROM usage_import_invocations i
+             WHERE i.at_ms > ? AND i.at_ms <= ?
+               AND i.harness IN (${placeholders(active.length)})
+               AND NOT EXISTS (
+                 SELECT 1 FROM usage_import_exclusions e WHERE e.exclusion_key = i.session_key
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM usage_import_invocation_keys k
+                 JOIN usage_import_exclusions e ON e.exclusion_key = k.message_key
+                 WHERE k.harness = i.harness AND k.dedupe_key = i.dedupe_key
+               )`,
+            [interval.startMs, interval.endMs, ...active],
+          );
+          for (const row of rows) {
+            const providerId = IMPORT_PROVIDER_BY_HARNESS[row.harness as UsageImportHarness];
+            const effort = row.effort ?? undefined;
+            const key = [providerId, row.model, effort ?? ""].join("\0");
+            let accumulator = groups.get(key);
+            if (accumulator === undefined) {
+              accumulator = {
+                ...emptyImportedAccumulator(),
+                providerId,
+                modelId: row.model,
+                ...(effort === undefined ? {} : { effort }),
+              };
+              groups.set(key, accumulator);
+            }
+            const tokens: TokenBuckets = {
+              input: row.input_tokens,
+              cache_read: row.cache_read_tokens,
+              cache_write: row.cache_write_tokens,
+              output: row.output_tokens,
+              reasoning: row.reasoning_tokens,
+            };
+            accumulator.input += tokens.input;
+            accumulator.cacheRead += tokens.cache_read;
+            accumulator.cacheWrite += tokens.cache_write;
+            accumulator.output += tokens.output;
+            accumulator.reasoning += tokens.reasoning;
+            accumulator.stepCount += 1;
+            const priced = priceTokenBuckets({
+              providerID: providerId,
+              modelID: row.model,
+              tokens,
+              atMs: row.at_ms,
+              cache: pricingCache,
+            });
+            if (priced.status === "priced" || priced.status === "partial") {
+              accumulator.pricedAny = true;
+              accumulator.costUsd += priced.costUsd;
+              if (priced.status === "partial") accumulator.unpricedTokens += priced.unpricedTokens;
+            } else if (priced.status === "unpriced") {
+              accumulator.unpricedTokens += totalTokenBuckets(tokens);
+            } else {
+              accumulator.unknownTokens += totalTokenBuckets(tokens);
+            }
+          }
+        }
+        const entries: UsageActivityEntry[] = [...groups.values()]
+          .map((accumulator) => ({
+            providerId: accumulator.providerId,
+            modelId: accumulator.modelId,
+            ...(accumulator.effort === undefined ? {} : { effort: accumulator.effort }),
+            tokens: finalizeImportedActivity(accumulator),
+            stepCount: accumulator.stepCount,
+          }))
+          .sort(
+            (left, right) =>
+              left.providerId.localeCompare(right.providerId) ||
+              left.modelId.localeCompare(right.modelId) ||
+              (left.effort ?? "").localeCompare(right.effort ?? ""),
+          );
+        let incomplete = false;
+        let unpricedTokens = 0;
+        let unknownTokens = 0;
+        for (const entry of entries) {
+          unpricedTokens += entry.tokens.unpricedTokens;
+          unknownTokens += entry.tokens.unknownTokens;
+          if (
+            entry.tokens.apiEquivalentCostUsd === null ||
+            entry.tokens.unpricedTokens > 0 ||
+            entry.tokens.unknownTokens > 0
+          ) {
+            incomplete = true;
+          }
+        }
+        return {
+          startMs: interval.startMs,
+          endMs: interval.endMs,
+          entries,
+          incomplete,
+          unpricedTokens,
+          unknownTokens,
+        };
+      }),
+    };
+  }
+
   function query(span: { startMs: number; endMs: number }): UsageHistorySlice {
     const startMs = Math.min(span.startMs, span.endMs);
     const endMs = Math.max(span.startMs, span.endMs);
@@ -686,6 +1193,12 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     path,
     recordCycle,
     query,
+    recordImportedInvocations,
+    recordCodexRateLimitObservations,
+    addImportExclusionKeys,
+    getImportState,
+    setImportState,
+    queryImportedActivity,
     close() {
       conn.close();
     },

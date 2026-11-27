@@ -10,8 +10,9 @@ import {
   hashUsageImport,
   listJsonlFiles,
   readIncrementalJsonlFile,
+  readJsonlFilesWithBudget,
   type UsageImportTokens,
-  usageImportFileKey,
+  type UsageResetPrecision,
 } from "./usage-import.js";
 
 /**
@@ -51,6 +52,8 @@ export interface CodexRateLimitObservation {
   windowMinutes?: number;
   usedPercent: number;
   resetsAtMs?: number;
+  /** `exact` for `resets_at`; `estimated` for a relative `resets_in_seconds`. */
+  resetPrecision?: UsageResetPrecision;
   planType?: string;
   limitId?: string;
 }
@@ -95,6 +98,8 @@ export interface CodexHistoryReadInput {
   /** CODEX_HOME. The resolver below derives it from the environment or home directory. */
   root?: string;
   cursor?: CodexImportCursor;
+  /** Per-run byte budget; unread files keep their prior cursor. */
+  maxBytes?: number;
 }
 
 interface CodexRateLimitWindow {
@@ -396,15 +401,24 @@ function rateLimitObservations(
   for (const window of ["primary", "secondary"] as const) {
     const value = rateLimits[window];
     if (value === undefined) continue;
+    // `resets_at` is a provider-supplied absolute timestamp; `resets_in_seconds`
+    // is only an offset from local observation time, so its point is estimated.
+    const absolute =
+      value.resetsAtMs !== undefined && Number.isFinite(value.resetsAtMs)
+        ? value.resetsAtMs
+        : undefined;
     const resetsAtMs =
-      value.resetsAtMs ??
+      absolute ??
       (value.resetsInSeconds === undefined ? undefined : atMs + value.resetsInSeconds * 1000);
+    const resetPrecision: UsageResetPrecision | undefined =
+      absolute !== undefined ? "exact" : resetsAtMs === undefined ? undefined : "estimated";
     observations.push({
       atMs,
       window,
       ...(value.windowMinutes === undefined ? {} : { windowMinutes: value.windowMinutes }),
       usedPercent: value.usedPercent,
       ...(resetsAtMs === undefined || !Number.isFinite(resetsAtMs) ? {} : { resetsAtMs }),
+      ...(resetPrecision === undefined ? {} : { resetPrecision }),
       ...(rateLimits.planType === undefined ? {} : { planType: rateLimits.planType }),
       ...(rateLimits.limitId === undefined ? {} : { limitId: rateLimits.limitId }),
     });
@@ -472,6 +486,7 @@ function createCodexAccumulator(): CodexBatchSink & { result: () => CodexImporte
         observation.windowMinutes ?? "",
         observation.usedPercent,
         observation.resetsAtMs ?? "",
+        observation.resetPrecision ?? "",
       ].join("\0");
       threadFor(threadKey, state).observations.set(key, observation);
     },
@@ -534,24 +549,25 @@ export async function readCodexHistory(
   ]);
   const paths = [...(sessions ?? []), ...(archived ?? [])].sort();
   const accumulator = createCodexAccumulator();
-  const nextFiles: Record<string, CodexFileCursor> = {};
-
-  for (const path of paths) {
-    const key = usageImportFileKey(path);
-    const cursor = await readIncrementalJsonlFile<CodexFileCursor, CodexParseState>({
-      path,
-      prior: previous.files[key],
-      state: (prior) => parseStateFromCursor(prior),
-      onLine: (line, state) => applyCodexLine(line, state, accumulator),
-      toCursor: (state, stats, byteOffset) => ({
-        ...state,
-        size: stats.size,
-        mtimeMs: stats.mtimeMs,
-        byteOffset,
+  const nextFiles = await readJsonlFilesWithBudget<CodexFileCursor>({
+    paths,
+    previous: previous.files,
+    ...(input.maxBytes !== undefined ? { maxBytes: input.maxBytes } : {}),
+    read: (path, prior, budget) =>
+      readIncrementalJsonlFile<CodexFileCursor, CodexParseState>({
+        path,
+        prior,
+        state: (statePrior) => parseStateFromCursor(statePrior),
+        onLine: (line, state) => applyCodexLine(line, state, accumulator),
+        toCursor: (state, stats, byteOffset) => ({
+          ...state,
+          size: stats.size,
+          mtimeMs: stats.mtimeMs,
+          byteOffset,
+        }),
+        ...(budget !== undefined ? { budget } : {}),
       }),
-    });
-    if (cursor !== undefined) nextFiles[key] = cursor;
-  }
+  });
 
   return {
     available: true,

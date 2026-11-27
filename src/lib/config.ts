@@ -119,6 +119,8 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "export.enabled",
   "export.path",
   "telemetry.enabled",
+  "usageImport.claudeCode",
+  "usageImport.codex",
   "dashboard.enabled",
   "dashboard.port",
   "dashboard.hiddenCards",
@@ -213,6 +215,7 @@ type MaintainerAnnouncementsPatch = Partial<QuotaToastConfig["maintainerAnnounce
 type LayoutPatch = Partial<QuotaToastConfig["layout"]>;
 type ExportConfigPatch = Partial<QuotaToastConfig["export"]>;
 type TelemetryConfigPatch = Partial<QuotaToastConfig["telemetry"]>;
+type UsageImportConfigPatch = Partial<QuotaToastConfig["usageImport"]>;
 type DashboardConfigPatch = Partial<QuotaDashboardConfig>;
 
 type ValidatedQuotaToastPatch = {
@@ -260,6 +263,7 @@ type ValidatedQuotaToastPatch = {
   layout?: LayoutPatch;
   export?: ExportConfigPatch;
   telemetry?: TelemetryConfigPatch;
+  usageImport?: UsageImportConfigPatch;
   dashboard?: DashboardConfigPatch;
 };
 
@@ -441,6 +445,7 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
     layout: { ...config.layout },
     export: { ...config.export },
     telemetry: { ...config.telemetry },
+    usageImport: { ...config.usageImport },
     dashboard: {
       enabled: config.dashboard.enabled,
       port: config.dashboard.port,
@@ -863,6 +868,21 @@ function extractTelemetryConfigPatch(value: unknown): TelemetryConfigPatch | und
     patch.enabled = value.enabled;
   }
 
+  return Object.keys(patch).length > 0 ? patch : undefined;
+}
+
+/** A malformed harness flag is reported and left at its previous value. */
+function extractUsageImportConfigPatch(
+  value: unknown,
+  reportIssue?: (key: string, message: string) => void,
+): UsageImportConfigPatch | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const patch: UsageImportConfigPatch = {};
+  for (const harness of ["claudeCode", "codex"] as const) {
+    if (!hasOwnKey(value, harness)) continue;
+    if (typeof value[harness] === "boolean") patch[harness] = value[harness];
+    else reportIssue?.(`usageImport.${harness}`, "expected boolean");
+  }
   return Object.keys(patch).length > 0 ? patch : undefined;
 }
 
@@ -1328,6 +1348,13 @@ function extractValidatedQuotaToastPatch(
     }
   }
 
+  if (hasOwnKey(quotaToastConfig, "usageImport")) {
+    const usageImport = extractUsageImportConfigPatch(quotaToastConfig.usageImport, reportIssue);
+    if (usageImport) {
+      patch.usageImport = usageImport;
+    }
+  }
+
   if (hasOwnKey(quotaToastConfig, "dashboard")) {
     const dashboard = extractDashboardPatch(quotaToastConfig.dashboard, reportIssue);
     if (dashboard) {
@@ -1695,6 +1722,14 @@ function applyValidatedQuotaToastPatch(
   if (patch.telemetry && hasOwnKey(patch.telemetry, "enabled")) {
     config.telemetry.enabled = patch.telemetry.enabled!;
     applySettingSource(settingSources, "telemetry.enabled", sourcePath);
+  }
+
+  if (patch.usageImport) {
+    for (const harness of ["claudeCode", "codex"] as const) {
+      if (!hasOwnKey(patch.usageImport, harness)) continue;
+      config.usageImport[harness] = patch.usageImport[harness]!;
+      applySettingSource(settingSources, `usageImport.${harness}`, sourcePath);
+    }
   }
 
   if (patch.dashboard) {

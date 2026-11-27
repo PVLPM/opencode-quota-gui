@@ -15,7 +15,7 @@ Branch `feat/v1.4.0`, base `main@8c0aad2e` (v1.3.3).
 | A | Investigation, contracts, plan | done (this file) |
 | B | Observation store + polling capture | pending |
 | C | Effort on owned steps + interval activity query + attribution | pending |
-| D | Claude Code / Codex opt-in import + dedupe | part 1: privacy-minimal parsers/readers; settings + store wiring pending |
+| D | Claude Code / Codex opt-in import + dedupe | done: parsers/readers, settings, schema v3, scheduling, exclusions, activity query |
 | E | Usage navigation, charts, inspection, breakdown (browser + native) | pending |
 | F | Integration, benchmarks, review, screenshots, draft PR | pending |
 
@@ -146,6 +146,37 @@ and file-cursor keys are persisted. Discovery reads plain `.jsonl` rollouts
 (`sessions/`, `archived_sessions/`) and Claude `projects/` recursively; Codex
 `.jsonl.zst` archives are not decompressed.
 
+D10.2 integration (part 2):
+- Settings `usageImport.claudeCode` / `usageImport.codex` default false, are
+  validated and GUI-writable, and appear in normal settings provenance. No UI
+  controls were added by this lane.
+- Store schema v2 adds `usage_import_invocations`, hashed per-message keys,
+  and the hash-only exclusion set. Schema v3 adds `usage_runs.reset_precision`,
+  which imported Codex readings fill from the provider: `resets_at` is an
+  absolute provider timestamp (`exact`), while `resets_in_seconds` is a local
+  offset (`estimated`). Import cursors and last outcome live in
+  `usage_meta` (`import_state:<harness>`), so restarts resume, and a
+  disabled-to-enabled transition re-reads from offset 0 (idempotent through
+  dedupe keys).
+- Import runs only after a live quota cycle the host already performs. It is
+  single-flight and debounced by that poll interval, reads at most 16 MiB of
+  newly appended data per harness per opportunity, and never performs a
+  provider request.
+- Cross-harness exclusion: OpenCode's Claude Agent integration writes
+  Claude Code transcripts. Host `data.native.sessionID/messageID` values are
+  hashed with the reader's session/uuid key functions and stored at observe
+  time; imported records carrying those keys (whole session or one message)
+  are excluded at query time. No OpenCode integration writes Codex rollouts,
+  so Codex has no exclusion and remains a separate source, never merged into
+  OpenCode attribution.
+- Imported Codex rate limits become `codex-import` series whose `cardId` is
+  `codex-import:<accountHash|unknown>` with row keys `window:five_hour` /
+  `window:week` for exact 300 / 10080 minute windows, otherwise
+  `named:<limitId>|<window>|<minutes>`. They are not merged into OpenAI cards.
+- Imported activity is grouped by provider/model/effort and priced through
+  `priceTokenBuckets`; provider ids are `anthropic` for Claude Code and
+  `openai` for Codex, and the caller keeps the import source separate.
+
 ### D11 No new traffic
 Capture hooks into the existing `createDelegatingSource.quota` observation
 path next to the notification observer. No provider request is added, and
@@ -153,7 +184,29 @@ Usage reads never trigger provider polling.
 
 ## Provider capability matrix
 
+### Polled providers
+
 (Filled from investigation; see section maintained in workstream B.)
+
+### Opt-in history import
+
+| Harness | Structured data imported | Priced activity | Quota observations | Ownership exclusion |
+|---|---|---|---|---|
+| Claude Code | assistant token counters, model, timestamp; `message.id + requestId` dedupe | yes, provider `anthropic` | none (transcripts carry no rate limits) | session + message UUID hashes from OpenCode Claude Agent native ids |
+| Codex | `token_count` totals/deltas, model, effort, rate limits | yes, provider `openai` | `codex-import` series from `rate_limits`, 5h/7d semantic or named windows, exact/estimated reset precision | not needed: OpenCode writes no Codex rollouts |
+
+Import limitations:
+
+- Settings-only in this lane; no Usage-view controls were added.
+- Codex `.jsonl.zst` archived rollouts are skipped; only plain `.jsonl` is read.
+- Imported Codex rate-limit runs are written by a synthetic `codex-import`
+  cycle with no linked live polling, so intervals between them render as
+  unobserved rather than continuous monitoring.
+- Toggling an import off and on re-reads from offset 0 to pick up the disabled
+  period. Imported invocations dedupe by key, but Codex rate-limit points can
+  repeat on that re-read.
+- Imported activity entries carry no source field; the caller labels them
+  `claude-code-import` / `codex-import` when composing `UsageSnapshot`.
 
 ## Open product questions (owner)
 
@@ -166,5 +219,7 @@ Usage reads never trigger provider polling.
 - A: investigation complete; plan recorded.
 - D1: privacy-minimal Claude Code and Codex history parsers plus incremental
   readers added (`src/lib/{codex-history,claude-code-history,usage-import,
-  claude-transcript-usage}.ts`). Settings flags, store writes and cross-harness
-  exclusion wiring remain with the integration lane.
+  claude-transcript-usage}.ts`).
+- D10 part 2: settings flags, schema v2, importer scheduling after live quota cycles,
+  host-native exclusion capture, Codex rate-limit series, imported activity
+  query, and privacy/restart/dedupe/exclusion/pricing tests added.

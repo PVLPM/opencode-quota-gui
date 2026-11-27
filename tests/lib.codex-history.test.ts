@@ -319,6 +319,7 @@ describe("readCodexHistory", () => {
         windowMinutes: 300,
         usedPercent: 25,
         resetsAtMs: Date.parse(SECOND) + 3_600_000,
+        resetPrecision: "estimated",
         planType: "plus",
       },
       {
@@ -326,6 +327,7 @@ describe("readCodexHistory", () => {
         window: "secondary",
         usedPercent: 50,
         resetsAtMs: 1_893_542_400_000,
+        resetPrecision: "exact",
         planType: "plus",
       },
     ]);
