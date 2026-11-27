@@ -521,12 +521,15 @@ export async function fetchQuotaProviderResult(params: {
     resolvedAuthIdentity: scope.resolvedAuthIdentity,
   });
   // A clone of an already-measured result keeps that measurement's time; the
-  // cache entry is the fallback when the result came from another writer.
-  const measuredReplay = (result: QuotaProviderResult): QuotaProviderResult =>
-    measuredClone(
-      result,
-      quotaResultMeasuredAtMs(result) ?? inMemoryCache.get(key)?.timestamp ?? Date.now(),
-    );
+  // cache entry is the fallback when the result came from another writer. A
+  // result with no evidence stays unmarked so the usage recorder rejects it
+  // instead of inventing a `Date.now()` observation.
+  const measuredReplay = (result: QuotaProviderResult): QuotaProviderResult => {
+    const measuredAt = quotaResultMeasuredAtMs(result) ?? inMemoryCache.get(key)?.timestamp;
+    return measuredAt === undefined
+      ? cloneQuotaProviderResult(result)
+      : measuredClone(result, measuredAt);
+  };
   // A process-local identity (Windows) may key only the in-memory tier: the value is not stable
   // across restarts, so it must never name a persisted file.
   const memoryOnly = scope.memoryOnly === true;

@@ -44,6 +44,20 @@ export interface UsageImportSettings {
   codex: boolean;
 }
 
+/** Empty imported-activity result aligned with the requested intervals. */
+export function emptyImportedActivity(query: UsageActivityQuery): UsageActivityResult {
+  return {
+    intervals: query.intervals.map((interval) => ({
+      startMs: interval.startMs,
+      endMs: interval.endMs,
+      entries: [],
+      incomplete: false,
+      unpricedTokens: 0,
+      unknownTokens: 0,
+    })),
+  };
+}
+
 export interface UsageImportStatus {
   harness: UsageImportHarness;
   enabled: boolean;
@@ -390,16 +404,7 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
         }
         const active = harnesses.filter((harness) => harnessEnabled(settings, harness));
         if (active.length === 0) {
-          return {
-            intervals: query.intervals.map((interval) => ({
-              startMs: interval.startMs,
-              endMs: interval.endMs,
-              entries: [],
-              incomplete: false,
-              unpricedTokens: 0,
-              unknownTokens: 0,
-            })),
-          };
+          return emptyImportedActivity(query);
         }
         const store = await options.store();
         return store.queryImportedActivity(query, active);

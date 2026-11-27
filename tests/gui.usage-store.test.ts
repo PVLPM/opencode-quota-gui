@@ -5,13 +5,15 @@
  * of retained/cooldown/error cycles, restart and concurrent-writer behaviour,
  * out-of-order splitting, missing-row evidence and the privacy-safe schema.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ProviderCard, QuotaCardRow, QuotaSnapshot } from "../src/contracts/dashboard.js";
 import type { RowId } from "../src/contracts/identity.js";
+import { createGuiLogger } from "../src/gui/log.js";
 import {
   markQuotaObservationCycle,
   markQuotaObservationLive,
@@ -111,7 +113,10 @@ function observation(
     providerIds: ["alpha"],
     samples,
     interruptions: [],
-    nowMs: BASE,
+    nowMs:
+      samples.length > 0
+        ? Math.max(...samples.map((item) => item.measuredAtMs))
+        : (overrides.nowMs ?? BASE),
     ...overrides,
   };
 }
@@ -236,21 +241,59 @@ describe("usage store: series identity and run compression", () => {
     expect(runs[0]?.sampleCount).toBe(1);
   });
 
-  it("stores an out-of-order sample without dropping history and splits an interior run", async () => {
+  it("records an out-of-order different value as conflict evidence, never as a split step", async () => {
     const db = await store();
     db.recordCycle(observation([sample(ROW_A, BASE, 50)]));
     db.recordCycle(observation([sample(ROW_A, BASE + MINUTE, 50)], { collectorRunId: "run-2" }));
 
     db.recordCycle(observation([sample(ROW_A, BASE + 30_000, 40)], { collectorRunId: "run-3" }));
-    const runs = runsOf(db, ROW_A);
-    expect(runs).toHaveLength(3);
-    expect(runs.map((run) => run.remainingPercent)).toEqual([50, 40, 50]);
-    expect(runs.map((run) => run.firstAtMs)).toEqual([BASE, BASE + 30_000, BASE + 30_000]);
-    expect(runs.reduce((total, run) => total + run.sampleCount, 0)).toBe(3);
+    let runs = runsOf(db, ROW_A);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.remainingPercent).toBe(50);
+    expect(runs[0]?.firstAtMs).toBe(BASE);
+    expect(runs[0]?.lastAtMs).toBe(BASE + MINUTE);
+    expect(runs[0]?.sampleCount).toBe(2);
+    let slice = db.query({ startMs: BASE, endMs: BASE + MINUTE });
+    expect(slice.conflicts).toEqual([
+      {
+        conflictId: expect.any(Number),
+        seriesId: ROW_A,
+        atMs: BASE + 30_000,
+        remainingPercent: 40,
+        existingRemainingPercent: 50,
+        kind: "inside-run",
+      },
+    ]);
 
-    // A duplicate of the out-of-order point is a no-op, not a fourth run.
+    // A replay of the conflicting sample is idempotent evidence.
     db.recordCycle(observation([sample(ROW_A, BASE + 30_000, 40)], { collectorRunId: "run-4" }));
-    expect(runsOf(db, ROW_A)).toHaveLength(3);
+    slice = db.query({ startMs: BASE, endMs: BASE + MINUTE });
+    expect(slice.conflicts).toHaveLength(1);
+    runs = runsOf(db, ROW_A);
+    expect(runs).toHaveLength(1);
+  });
+
+  it("counts an out-of-order same-value sample without moving run endpoints", async () => {
+    const db = await store();
+    db.recordCycle(observation([sample(ROW_A, BASE, 50)]));
+    db.recordCycle(observation([sample(ROW_A, BASE + MINUTE, 50)], { collectorRunId: "run-2" }));
+    db.recordCycle(observation([sample(ROW_A, BASE + 30_000, 50)], { collectorRunId: "run-3" }));
+    const runs = runsOf(db, ROW_A);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.sampleCount).toBe(3);
+    expect(runs[0]?.lastAtMs).toBe(BASE + MINUTE);
+    expect(db.query({ startMs: BASE, endMs: BASE + MINUTE }).conflicts).toEqual([]);
+  });
+
+  it("inserts a gap sample as an unlinked run and unlinks the following run", async () => {
+    const db = await store();
+    db.recordCycle(observation([sample(ROW_A, BASE, 80)]));
+    db.recordCycle(observation([sample(ROW_A, BASE + MINUTE, 70)], { collectorRunId: "run-2" }));
+    db.recordCycle(observation([sample(ROW_A, BASE + 30_000, 75)], { collectorRunId: "run-3" }));
+    const runs = runsOf(db, ROW_A);
+    expect(runs.map((run) => run.remainingPercent)).toEqual([80, 75, 70]);
+    expect(runs.map((run) => run.linked)).toEqual([false, false, false]);
+    expect(db.query({ startMs: BASE, endMs: BASE + MINUTE }).conflicts).toEqual([]);
   });
 
   it("keeps an earlier sample inserted after a later one", async () => {
@@ -261,6 +304,51 @@ describe("usage store: series identity and run compression", () => {
     expect(slice.runs.map((run) => run.remainingPercent)).toEqual([80, 60]);
     expect(slice.series[0]?.firstAtMs).toBe(BASE);
     expect(slice.series[0]?.lastAtMs).toBe(BASE + MINUTE);
+  });
+});
+
+describe("usage store: latest epoch reads", () => {
+  it("returns only the newest epoch, using replenishment and reset evidence", async () => {
+    const db = await store();
+    db.recordCycle(observation([sample(ROW_A, BASE, 90)]));
+    db.recordCycle(observation([sample(ROW_A, BASE + MINUTE, 80)], { collectorRunId: "run-2" }));
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 2 * MINUTE, 95)], { collectorRunId: "run-3" }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 3 * MINUTE, 90)], { collectorRunId: "run-4" }),
+    );
+
+    const beta = series(ROW_B, { providerLabel: "Beta" });
+    db.recordCycle(
+      observation(
+        [
+          sample(ROW_B, BASE, 50, {
+            series: beta,
+            resetAtMs: BASE + 30_000,
+          }),
+        ],
+        { collectorRunId: "run-b1" },
+      ),
+    );
+    db.recordCycle(
+      observation(
+        [
+          sample(ROW_B, BASE + MINUTE, 50, {
+            series: beta,
+            resetAtMs: BASE + 90_000,
+          }),
+        ],
+        { collectorRunId: "run-b2" },
+      ),
+    );
+
+    const slice = db.queryLatestEpochs();
+    const runsOf = (rowId: string) =>
+      slice.runs.filter((run) => run.seriesId === rowId).map((run) => run.remainingPercent);
+    expect(runsOf(ROW_A)).toEqual([95, 90]);
+    expect(runsOf(ROW_B)).toEqual([50]);
+    expect(slice.runs.find((run) => run.seriesId === ROW_B)?.firstAtMs).toBe(BASE + MINUTE);
   });
 });
 
@@ -358,6 +446,165 @@ describe("usage store: persistence and concurrent writers", () => {
     const runs = runsOf(verification, ROW_A);
     expect(runs).toHaveLength(1);
     expect(runs[0]?.sampleCount).toBe(3);
+  });
+});
+
+describe("usage store: duplicate, interruption and identity policy", () => {
+  it("makes a repeated per-cycle observation idempotent by cycle id", async () => {
+    const db = await store();
+    const cycle = observation([sample(ROW_A, BASE, 80)], { collectorRunId: "cycle-a" });
+    db.recordCycle(cycle);
+    db.recordCycle(cycle);
+    expect(runsOf(db, ROW_A)[0]?.sampleCount).toBe(1);
+
+    const interrupted = observation([], {
+      collectorRunId: "cycle-b",
+      observedCards: [{ cardId: "card-a", providerId: "alpha", atMs: BASE }],
+      interruptions: [
+        { cardId: "card-a", providerId: "alpha", kind: "retained", atMs: BASE + MINUTE },
+      ],
+    });
+    db.recordCycle(interrupted);
+    db.recordCycle(interrupted);
+    const slice = db.query({ startMs: BASE, endMs: BASE + MINUTE });
+    expect(slice.interruptions.find((item) => item.kind === "retained")?.count).toBe(1);
+  });
+
+  it("breaks a link after a failed attempt between two successes and ends spans on success", async () => {
+    const db = await store();
+    db.recordCycle(observation([sample(ROW_A, BASE, 80)], { collectorRunId: "run-1" }));
+    db.recordCycle(
+      observation([], {
+        collectorRunId: "run-2",
+        nowMs: BASE + MINUTE,
+        observedCards: [{ cardId: "card-a", providerId: "alpha", atMs: BASE }],
+        interruptions: [
+          { cardId: "card-a", providerId: "alpha", kind: "error", atMs: BASE + MINUTE },
+        ],
+      }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 2 * MINUTE, 70)], { collectorRunId: "run-3" }),
+    );
+    db.recordCycle(
+      observation([], {
+        collectorRunId: "run-4",
+        nowMs: BASE + 3 * MINUTE,
+        observedCards: [{ cardId: "card-a", providerId: "alpha", atMs: BASE }],
+        interruptions: [
+          { cardId: "card-a", providerId: "alpha", kind: "error", atMs: BASE + 3 * MINUTE },
+        ],
+      }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 4 * MINUTE, 60)], { collectorRunId: "run-5" }),
+    );
+
+    const runs = runsOf(db, ROW_A);
+    expect(runs.map((run) => run.remainingPercent)).toEqual([80, 70, 60]);
+    expect(runs.map((run) => run.linked)).toEqual([false, false, false]);
+    const errors = db
+      .query({ startMs: BASE, endMs: BASE + 4 * MINUTE })
+      .interruptions.filter((item) => item.kind === "error");
+    expect(errors).toHaveLength(2);
+    expect(errors.map((item) => [item.firstAtMs, item.lastAtMs])).toEqual([
+      [BASE + MINUTE, BASE + MINUTE],
+      [BASE + 3 * MINUTE, BASE + 3 * MINUTE],
+    ]);
+  });
+
+  it("carries reset precision and tolerates estimated reset jitter in one run", async () => {
+    const db = await store();
+    const estimated = (minute: number, resetAtMs: number) =>
+      sample(ROW_A, BASE + minute * MINUTE, 80, { resetAtMs, resetPrecision: "estimated" });
+    db.recordCycle(observation([estimated(0, BASE + 60 * MINUTE)], { collectorRunId: "run-1" }));
+    db.recordCycle(
+      observation([estimated(1, BASE + 60 * MINUTE + 30_000)], { collectorRunId: "run-2" }),
+    );
+    const runs = runsOf(db, ROW_A);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.sampleCount).toBe(2);
+    expect(runs[0]?.reset_precision).toBe("estimated");
+    expect(runs[0]?.resetAtMs).toBe(BASE + 60 * MINUTE + 30_000);
+  });
+
+  it("treats a capacity change as an identity boundary", async () => {
+    const db = await store();
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80, { capacityKey: "limit:100:req" })], {
+        collectorRunId: "run-1",
+      }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + MINUTE, 80, { capacityKey: "limit:200:req" })], {
+        collectorRunId: "run-2",
+      }),
+    );
+    const runs = runsOf(db, ROW_A);
+    expect(runs.map((run) => run.capacityKey)).toEqual(["limit:100:req", "limit:200:req"]);
+    expect(runs[1]?.linked).toBe(true);
+  });
+
+  it("keeps newer series metadata when a late sample arrives", async () => {
+    const db = await store();
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + MINUTE, 80, { series: series(ROW_A, { label: "New" }) })], {
+        collectorRunId: "run-1",
+      }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 70, { series: series(ROW_A, { label: "Old" }) })], {
+        collectorRunId: "run-2",
+      }),
+    );
+    const info = db.query({ startMs: BASE, endMs: BASE + MINUTE }).series[0];
+    expect(info?.label).toBe("New");
+    expect(info?.firstAtMs).toBe(BASE);
+    expect(info?.lastAtMs).toBe(BASE + MINUTE);
+  });
+
+  it("scopes missing-row evidence to cards observed in the same collector session", async () => {
+    const db = await store();
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80)], {
+        collectorRunId: "session-1-run",
+        collectorSessionId: "session-1",
+      }),
+    );
+    // A different collector/credential scope sees another card and must not
+    // report the first session's card as missing.
+    db.recordCycle(
+      observation([sample(ROW_B, BASE + MINUTE, 70, { series: series(ROW_B) })], {
+        collectorRunId: "session-2-run",
+        collectorSessionId: "session-2",
+        observedCards: [{ cardId: "card-b", providerId: "alpha", atMs: BASE + MINUTE }],
+        providerIds: ["alpha"],
+      }),
+    );
+    const missing = db
+      .query({ startMs: BASE, endMs: BASE + MINUTE })
+      .interruptions.filter((item) => item.kind === "missing-row");
+    expect(missing).toEqual([]);
+  });
+
+  it("makes repeated Codex rate-limit imports idempotent", async () => {
+    const db = await store();
+    const point = {
+      atMs: BASE,
+      window: "primary" as const,
+      windowMinutes: 300,
+      usedPercent: 20,
+      planType: "pro",
+    };
+    db.recordCodexRateLimitObservations([point]);
+    db.recordCodexRateLimitObservations([point]);
+    const slice = db.query({ startMs: BASE, endMs: BASE + MINUTE });
+    const codex = slice.runs.filter((run) => run.seriesId.startsWith("codex-import:"));
+    expect(codex).toHaveLength(1);
+    expect(codex[0]?.sampleCount).toBe(1);
+    expect(
+      slice.series.find((item) => item.rowId === codex[0]?.seriesId)?.planLabel,
+    ).toBeUndefined();
   });
 });
 
@@ -475,13 +722,13 @@ describe("usage recorder: live capture, exclusions and measurement identity", ()
     expect(slice.interruptions.map((item) => item.kind)).toEqual(["retained", "cooldown", "error"]);
   });
 
-  it("stores display labels but no credential-shaped columns", async () => {
+  it("stores provider/row labels but never account or plan labels", async () => {
     const db = await store();
     const value = live(
       snapshot([
         card("card-a", [row("card-a", "window:five_hour|quota:percent", 80)], {
           providerLabel: "Alpha",
-          accountLabel: "Work",
+          accountLabel: "work@example.com",
           planLabel: "Pro",
         }),
       ]),
@@ -494,13 +741,19 @@ describe("usage recorder: live capture, exclusions and measurement identity", ()
     const slice = db.query({ startMs: 0, endMs: BASE + MINUTE });
     expect(slice.series[0]).toMatchObject({
       providerLabel: "Alpha",
-      accountLabel: "Work",
-      planLabel: "Pro",
       label: "Quota",
     });
+    expect(slice.series[0]?.accountLabel).toBeUndefined();
+    expect(slice.series[0]?.planLabel).toBeUndefined();
+    expect(JSON.stringify(slice)).not.toContain("work@example.com");
+    expect(JSON.stringify(slice)).not.toContain("Pro");
 
     const reader = await openOpenCodeSqliteReadOnly(path);
     try {
+      const stored = reader.get<{ account_label: string | null; plan_label: string | null }>(
+        "SELECT account_label, plan_label FROM usage_series",
+      );
+      expect(stored).toEqual({ account_label: null, plan_label: null });
       const columnsOf = (table: string): string[] =>
         reader
           .all<{ name: string }>(`PRAGMA table_info(${table})`)
@@ -525,6 +778,8 @@ describe("usage recorder: live capture, exclusions and measurement identity", ()
       );
       expect(columnsOf("usage_runs")).toEqual(
         [
+          "attempted_at_ms",
+          "capacity_key",
           "collector_interval_ms",
           "collector_run_id",
           "collector_session_id",
@@ -538,6 +793,18 @@ describe("usage recorder: live capture, exclusions and measurement identity", ()
           "reset_precision",
           "run_id",
           "sample_count",
+          "series_id",
+        ].sort(),
+      );
+      expect(columnsOf("usage_conflicts")).toEqual(
+        [
+          "at_ms",
+          "collector_run_id",
+          "collector_session_id",
+          "conflict_id",
+          "existing_remaining_percent",
+          "kind",
+          "remaining_percent",
           "series_id",
         ].sort(),
       );
@@ -556,5 +823,105 @@ describe("usage recorder: live capture, exclusions and measurement identity", ()
     } finally {
       reader.close();
     }
+  });
+
+  it("rejects an unmarked success and is idempotent on close", async () => {
+    const db = await store();
+    const logs: string[] = [];
+    const recorder = createUsageRecorder({
+      store: db,
+      now: () => BASE,
+      logger: createGuiLogger({ sink: (line) => logs.push(line) }),
+    });
+    recorder.observe(
+      markQuotaObservationLive(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 80)])]),
+      ),
+    );
+    await recorder.flush();
+    expect(runsOf(db, ROW_A)).toHaveLength(0);
+    expect(logs.some((line) => line.includes("measurement-unmarked"))).toBe(true);
+
+    const first = recorder.close();
+    const second = recorder.close();
+    expect(second).toBe(first);
+    await first;
+  });
+});
+
+describe("usage recorder: store recovery and lock carry-over", () => {
+  it("retries a failed store open on a later observation instead of memoizing the error", async () => {
+    const logs: string[] = [];
+    const nested = join(root, "not-yet", "usage-history.sqlite");
+    // A directory at the DB path makes the first open fail deterministically.
+    await mkdir(nested, { recursive: true });
+    const recorder = createUsageRecorder({
+      path: nested,
+      now: () => BASE,
+      logger: createGuiLogger({ sink: (line) => logs.push(line) }),
+    });
+
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 80)])]),
+        new Map([["card-a", BASE]]),
+      ),
+    );
+    await recorder.flush();
+    expect(logs.some((line) => line.includes("store-unavailable"))).toBe(true);
+
+    await rm(nested, { recursive: true, force: true });
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 70)])]),
+        new Map([["card-a", BASE + MINUTE]]),
+      ),
+    );
+    await recorder.flush();
+    expect(existsSync(nested)).toBe(true);
+    const opened = await openUsageStore(nested);
+    stores.push(opened);
+    expect(runsOf(opened, ROW_A)).toHaveLength(1);
+    expect(runsOf(opened, ROW_A)[0]?.remainingPercent).toBe(70);
+    await recorder.close();
+  });
+
+  it("carries a cycle over after a write lock and records it on the next observation", async () => {
+    const recorded: UsageCycleObservation[] = [];
+    let failures = 2;
+    const fake = {
+      path: "memory",
+      recordCycle(value: UsageCycleObservation) {
+        if (failures > 0) {
+          failures -= 1;
+          throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+        }
+        recorded.push(value);
+      },
+      close() {},
+    } as unknown as UsageStore;
+    const recorder = createUsageRecorder({ store: fake, now: () => BASE });
+
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 80)])]),
+        new Map([["card-a", BASE]]),
+      ),
+    );
+    // The first write and the flush retry both hit the lock: bounded carry-over.
+    await recorder.flush();
+    expect(recorded).toHaveLength(0);
+
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 70)])]),
+        new Map([["card-a", BASE + MINUTE]]),
+      ),
+    );
+    await recorder.flush();
+    expect(recorded).toHaveLength(2);
+    expect(recorded[0]?.samples[0]?.remainingPercent).toBe(80);
+    expect(recorded[1]?.samples[0]?.remainingPercent).toBe(70);
+    await recorder.close();
   });
 });

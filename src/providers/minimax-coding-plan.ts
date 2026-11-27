@@ -257,6 +257,9 @@ function buildMiniMaxEntry(
     percentRemaining: data.percentRemaining,
     ...(data.basis ? { basis: data.basis } : {}),
     resetTimeIso: data.resetTimeIso,
+    // `remains_time` is a relative offset; the provider computes the instant
+    // locally, so reset-time jitter must not split a run.
+    resetPrecision: "estimated",
     semantic,
     accounting: MINIMAX_TOKEN_PLAN_ACCOUNTING,
   };

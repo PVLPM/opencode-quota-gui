@@ -1,4 +1,5 @@
 import type { QuotaSnapshot } from "../contracts/dashboard.js";
+import type { UsageResetPrecision } from "../lib/usage-import.js";
 
 /**
  * Live-cycle identity for quota observations.
@@ -28,6 +29,12 @@ export function isLiveQuotaObservation(snapshot: QuotaSnapshot): boolean {
 export interface QuotaObservationCycle {
   /** Genuine measurement time per card; absent means the card was not measured. */
   readonly measuredAtByCard: ReadonlyMap<string, number>;
+  /** Collector attempt time of this cycle; interruption evidence is stamped with it. */
+  readonly attemptedAtMs: number;
+  /** Per-row reset precision from the provider's internal evidence. */
+  readonly resetPrecisionByRow?: ReadonlyMap<string, UsageResetPrecision>;
+  /** Per-row normalized capacity/limit and plan identity used for epoch identity. */
+  readonly capacityKeyByRow?: ReadonlyMap<string, string>;
   readonly collectorRunId: string;
   readonly collectorSessionId: string;
   /** Configured poll interval of the collector at this cycle. */
@@ -46,11 +53,27 @@ export function markQuotaObservationCycle(
     measuredAtByCard: ReadonlyMap<string, number>;
     intervalMs: number;
     providerIds: readonly string[];
+    /** Cycle attempt time; defaults to the current clock for older callers. */
+    attemptedAtMs?: number;
+    resetPrecisionByRow?: ReadonlyMap<string, UsageResetPrecision>;
+    capacityKeyByRow?: ReadonlyMap<string, string>;
   },
 ): QuotaSnapshot {
   collectorRunSequence += 1;
+  const measuredTimes = [...input.measuredAtByCard.values()].filter((value) =>
+    Number.isFinite(value),
+  );
+  const fallbackAttemptAtMs = measuredTimes.length > 0 ? Math.max(...measuredTimes) : Date.now();
   cycles.set(snapshot, {
     measuredAtByCard: input.measuredAtByCard,
+    attemptedAtMs:
+      input.attemptedAtMs !== undefined && Number.isFinite(input.attemptedAtMs)
+        ? input.attemptedAtMs
+        : fallbackAttemptAtMs,
+    ...(input.resetPrecisionByRow !== undefined
+      ? { resetPrecisionByRow: input.resetPrecisionByRow }
+      : {}),
+    ...(input.capacityKeyByRow !== undefined ? { capacityKeyByRow: input.capacityKeyByRow } : {}),
     collectorRunId: `${collectorSessionId}:${collectorRunSequence}`,
     collectorSessionId,
     intervalMs: input.intervalMs,

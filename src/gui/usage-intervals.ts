@@ -42,8 +42,14 @@ export interface UsageSamplePoint {
   resetPrecision?: UsageResetPrecision;
   /** Evidence that this run continues the previous run under observation. */
   linked: boolean;
-  /** Normalized quantity unit identity, when the row carries one. */
+  /** Normalized identity: quantity unit and/or percent capacity + plan. */
   unitKey?: string;
+}
+
+/** Conflicting-sample evidence: the stored run cannot be trusted at `atMs`. */
+export interface UsageConflictPoint {
+  atMs: number;
+  remainingPercent: number;
 }
 
 export interface UsageSeriesInput {
@@ -52,6 +58,8 @@ export interface UsageSeriesInput {
   metric?: AccountingMetric;
   measurement: UsageMeasurementKind;
   points: readonly UsageSamplePoint[];
+  /** Conflicts render as `uncertain` boundaries, never as stored steps. */
+  conflicts?: readonly UsageConflictPoint[];
 }
 
 export interface UsageAxisInput {
@@ -61,22 +69,28 @@ export interface UsageAxisInput {
   span?: { startMs: number; endMs: number };
 }
 
-/** Store runs to the pure input shape; quantity units become identity keys. */
+/** Store runs to the pure input shape; capacity/unit become identity keys. */
 export function usagePointsFromRuns(
   runs: readonly UsageStoredRunWithPrecision[],
 ): UsageSamplePoint[] {
-  return runs.map((run) => ({
-    firstAtMs: run.firstAtMs,
-    lastAtMs: run.lastAtMs,
-    remainingPercent: run.remainingPercent,
-    sampleCount: run.sampleCount,
-    ...(run.resetAtMs !== undefined ? { resetAtMs: run.resetAtMs } : {}),
-    ...(run.reset_precision === "exact" || run.reset_precision === "estimated"
-      ? { resetPrecision: run.reset_precision }
-      : {}),
-    linked: run.linked,
-    ...(run.quantity !== undefined ? { unitKey: JSON.stringify(run.quantity.unit) } : {}),
-  }));
+  return runs.map((run) => {
+    const identity = [
+      ...(run.quantity !== undefined ? [JSON.stringify(run.quantity.unit)] : []),
+      ...(run.capacityKey !== undefined ? [run.capacityKey] : []),
+    ];
+    return {
+      firstAtMs: run.firstAtMs,
+      lastAtMs: run.lastAtMs,
+      remainingPercent: run.remainingPercent,
+      sampleCount: run.sampleCount,
+      ...(run.resetAtMs !== undefined ? { resetAtMs: run.resetAtMs } : {}),
+      ...(run.reset_precision === "exact" || run.reset_precision === "estimated"
+        ? { resetPrecision: run.reset_precision }
+        : {}),
+      linked: run.linked,
+      ...(identity.length > 0 ? { unitKey: identity.join("|") } : {}),
+    };
+  });
 }
 
 const RANGE_DURATION_MS: Partial<Record<UsageRangeKey, number>> = {
@@ -152,7 +166,17 @@ function boundaryBetween(
   return undefined;
 }
 
-function linkBetween(previous: UsageSamplePoint, current: UsageSamplePoint): UsageLink {
+function linkBetween(
+  previous: UsageSamplePoint,
+  current: UsageSamplePoint,
+  conflicts: readonly UsageConflictPoint[],
+): UsageLink {
+  const conflict = conflicts.find(
+    (item) => item.atMs >= previous.firstAtMs && item.atMs <= current.firstAtMs,
+  );
+  if (conflict !== undefined) {
+    return { kind: "boundary", boundary: "uncertain", atMs: conflict.atMs };
+  }
   const boundary = boundaryBetween(previous, current);
   if (boundary !== undefined) {
     return {
@@ -168,7 +192,10 @@ function overlap(startA: number, endA: number, startB: number, endB: number): nu
   return Math.max(0, Math.min(endA, endB) - Math.max(startA, startB));
 }
 
-function epochStarts(points: readonly UsageSamplePoint[]): number[] {
+function epochStarts(
+  points: readonly UsageSamplePoint[],
+  conflicts: readonly UsageConflictPoint[],
+): number[] {
   const starts: number[] = [];
   points.forEach((point, index) => {
     if (index === 0) {
@@ -176,7 +203,12 @@ function epochStarts(points: readonly UsageSamplePoint[]): number[] {
       return;
     }
     const previous = points[index - 1] as UsageSamplePoint;
-    if (boundaryBetween(previous, point) !== undefined) starts.push(index);
+    if (
+      boundaryBetween(previous, point) !== undefined ||
+      conflicts.some((item) => item.atMs >= previous.firstAtMs && item.atMs <= point.firstAtMs)
+    ) {
+      starts.push(index);
+    }
   });
   return starts;
 }
@@ -184,6 +216,7 @@ function epochStarts(points: readonly UsageSamplePoint[]): number[] {
 function includedIndexes(
   points: readonly UsageSamplePoint[],
   input: UsageAxisInput,
+  conflicts: readonly UsageConflictPoint[],
 ): { indexes: number[]; axis: { startMs: number; endMs: number } } {
   if (points.length === 0) {
     const startMs = input.span?.startMs ?? input.nowMs;
@@ -192,7 +225,7 @@ function includedIndexes(
   }
 
   if (input.range === "current") {
-    const starts = epochStarts(points);
+    const starts = epochStarts(points, conflicts);
     const latestStart = starts[starts.length - 1] ?? 0;
     const first = points[latestStart] as UsageSamplePoint;
     const last = points[points.length - 1] as UsageSamplePoint;
@@ -249,6 +282,7 @@ function buildIntervals(
   points: readonly UsagePoint[],
   links: readonly UsageLink[],
   axis: { startMs: number; endMs: number },
+  conflicted: readonly boolean[] = [],
 ): UsageInterval[] {
   const intervals: UsageInterval[] = [];
   for (let index = 0; index < points.length; index += 1) {
@@ -263,7 +297,7 @@ function buildIntervals(
         endMs: flatEndMs,
         previousRemainingPercent: point.remainingPercent,
         currentRemainingPercent: point.remainingPercent,
-        link: "observed",
+        link: conflicted[index] === true ? "boundary" : "observed",
         burnPercentPoints: 0,
         attributedBurnPercentPoints: 0,
         unattributedBurnPercentPoints: 0,
@@ -338,8 +372,11 @@ export function buildUsageWindowSeries(
   axisInput: UsageAxisInput,
 ): UsageWindowSeries {
   const sorted = sortPoints(input.points);
-  const { indexes, axis } = includedIndexes(sorted, axisInput);
+  const conflicts = [...(input.conflicts ?? [])].sort((left, right) => left.atMs - right.atMs);
+  const { indexes, axis } = includedIndexes(sorted, axisInput, conflicts);
   const included = indexes.map((index) => sorted[index] as UsageSamplePoint);
+  const conflictedPoint = (point: UsageSamplePoint): boolean =>
+    conflicts.some((item) => item.atMs >= point.firstAtMs && item.atMs <= point.lastAtMs);
 
   const points: UsagePoint[] = included.map((point) => ({
     startMs: point.firstAtMs,
@@ -356,11 +393,12 @@ export function buildUsageWindowSeries(
       linkBetween(
         included[position - 1] as UsageSamplePoint,
         included[position] as UsageSamplePoint,
+        conflicts,
       ),
     );
   }
 
-  const intervals = buildIntervals(points, links, axis);
+  const intervals = buildIntervals(points, links, axis, included.map(conflictedPoint));
   const observedBurn = intervals.reduce(
     (total, interval) => total + (interval.burnPercentPoints ?? 0),
     0,
