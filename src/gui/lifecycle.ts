@@ -69,6 +69,7 @@ import {
   type SnapshotServiceOptions,
 } from "./snapshot-service.js";
 import { createDashboardReadSource } from "./sources.js";
+import { createUsageRecorder, type UsageRecorder } from "./usage-recorder.js";
 
 /**
  * The V1-shaped client the quota read path already receives (plugin `client`):
@@ -154,6 +155,8 @@ export interface StartDashboardOptions {
   createSnapshots?: (options: SnapshotServiceOptions) => SnapshotService;
   /** Test/embedding seam: private quota notification cooldown state path. */
   quotaNotificationStatePath?: string;
+  /** Test/embedding seam: plugin-owned usage history database path. */
+  usageStorePath?: string;
   /** Test seam: replaces the transport factory. */
   createServer?: (options: DashboardServerOptions) => Promise<DashboardServerHandle>;
   logger?: GuiLogger;
@@ -193,6 +196,7 @@ interface DashboardRuntime {
   /** One host-lifetime quota interest, independent of any transport viewer. */
   quotaMonitor: ReturnType<SnapshotService["addScopedViewer"]> | undefined;
   quotaNotifications: QuotaNotificationObserver | undefined;
+  usage: UsageRecorder | undefined;
   settings: GuiSettingsStore | undefined;
   close(): Promise<void>;
 }
@@ -273,6 +277,7 @@ function createRuntime(source: DashboardReadSource, logger: GuiLogger): Dashboar
     snapshots: undefined,
     quotaMonitor: undefined,
     quotaNotifications: undefined,
+    usage: undefined,
     settings: undefined,
     close() {
       if (closing) return closing;
@@ -283,6 +288,12 @@ function createRuntime(source: DashboardReadSource, logger: GuiLogger): Dashboar
           logger.warn("quota notification observer close failed", failureLabel(error));
         }
         runtime.quotaNotifications = undefined;
+        try {
+          await runtime.usage?.close();
+        } catch (error) {
+          logger.warn("usage recorder close failed", failureLabel(error));
+        }
+        runtime.usage = undefined;
         try {
           runtime.quotaMonitor?.release();
         } catch (error) {
@@ -387,9 +398,10 @@ function dropOwner(host: DashboardHost, owner: DashboardOwner): boolean {
   return true;
 }
 
-/** Late-bound pointer to the host observer created after the source. */
+/** Late-bound pointers to the host recorder created after the source. */
 interface QuotaObservationTarget {
   observer?: QuotaNotificationObserver;
+  usage?: UsageRecorder;
 }
 
 /**
@@ -420,6 +432,8 @@ function createDelegatingSource(
       // classifying it against the replacement source's baseline.
       const observer = observation.observer;
       const epoch = observer?.epoch();
+      const usage = observation.usage;
+      const usageEpoch = usage?.epoch();
       const owner = delegation.activeOwner;
       const source = await requireSource();
       // Mirrors `SnapshotService`: a source without quota answers as unavailable.
@@ -427,6 +441,9 @@ function createDelegatingSource(
       const snapshot = await source.quota(input);
       if (observer !== undefined && delegation.activeOwner === owner) {
         observer.observe(snapshot, epoch);
+      }
+      if (usage !== undefined && delegation.activeOwner === owner) {
+        usage.observe(snapshot, usageEpoch);
       }
       return snapshot;
     },
@@ -626,6 +643,21 @@ async function startHost(
     observation.observer = quotaNotifications;
   } catch (error) {
     context.logger.warn("quota notifications unavailable", failureLabel(error));
+  }
+
+  // Local usage history shares the same completed cycle and epoch discipline.
+  // Construction opens nothing: the SQLite store is created on the first live
+  // observation, so a missing dashboard viewer or a broken state dir never
+  // touches the quota read path.
+  try {
+    const usage = createUsageRecorder({
+      ...(options.usageStorePath !== undefined ? { path: options.usageStorePath } : {}),
+      logger: context.logger,
+    });
+    runtime.usage = usage;
+    observation.usage = usage;
+  } catch (error) {
+    context.logger.warn("usage history unavailable", failureLabel(error));
   }
 
   const firstOwner = delegation.activeOwner;
