@@ -772,6 +772,7 @@ export function isUsageSnapshot(value: unknown): value is UsageSnapshot {
     !isText(value.timeZone) ||
     !isArrayOf(value.models, isUsageModelKey) ||
     !isArrayOf(value.imports, isUsageImport) ||
+    !isOptional(value.historyUnavailable, (entry) => entry === true) ||
     !isOptional(value.activityUnavailable, (entry) => entry === true)
   ) {
     return false;

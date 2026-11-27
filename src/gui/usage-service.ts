@@ -493,7 +493,10 @@ export function createUsageSnapshotBuilder(
   const timeZone = options.timeZone ?? resolveHostTimeZone();
   const path = options.path ?? getGuiPrivateStatePath(USAGE_HISTORY_FILE);
 
-  async function readSlice(range: UsageRangeKey, nowMs: number): Promise<UsageHistorySlice> {
+  async function readSlice(
+    range: UsageRangeKey,
+    nowMs: number,
+  ): Promise<{ slice: UsageHistorySlice; historyUnavailable: boolean }> {
     const duration = finiteDuration(range);
     const span =
       duration === undefined
@@ -501,20 +504,31 @@ export function createUsageSnapshotBuilder(
         : { startMs: nowMs - duration, endMs: nowMs };
     const store = options.store;
     if (store !== undefined) {
-      return range === "current" ? store.queryLatestEpochs() : store.query(span);
+      try {
+        return {
+          slice: range === "current" ? store.queryLatestEpochs() : store.query(span),
+          historyUnavailable: false,
+        };
+      } catch {
+        return { slice: EMPTY_SLICE, historyUnavailable: true };
+      }
     }
-    // A missing file is a fresh install, not an error. Any unreadable store is
-    // treated the same way: the Usage view shows no history instead of failing.
-    if (!existsSync(path)) return EMPTY_SLICE;
+    // A missing file is a fresh install, not an error. An existing but
+    // unreadable store is reported so the UI can distinguish it from "no
+    // history collected yet" while still showing the (empty) view.
+    if (!existsSync(path)) return { slice: EMPTY_SLICE, historyUnavailable: false };
     try {
       const opened = await openUsageStoreReadOnly(path);
       try {
-        return range === "current" ? opened.queryLatestEpochs() : opened.query(span);
+        return {
+          slice: range === "current" ? opened.queryLatestEpochs() : opened.query(span),
+          historyUnavailable: false,
+        };
       } finally {
         opened.close();
       }
     } catch {
-      return EMPTY_SLICE;
+      return { slice: EMPTY_SLICE, historyUnavailable: true };
     }
   }
 
@@ -851,7 +865,7 @@ export function createUsageSnapshotBuilder(
       const nowMs = now();
       const duration = finiteDuration(query.range);
       const span = duration === undefined ? undefined : { startMs: nowMs - duration, endMs: nowMs };
-      const slice = await readSlice(query.range, nowMs);
+      const { slice, historyUnavailable } = await readSlice(query.range, nowMs);
       const imports = await importStatus();
       const claudeEnabled = imports.some(
         (entry) => entry.harness === "claude-code" && entry.enabled,
@@ -882,6 +896,7 @@ export function createUsageSnapshotBuilder(
         }),
         models,
         imports,
+        ...(historyUnavailable ? { historyUnavailable: true as const } : {}),
         ...(unavailable ? { activityUnavailable: true as const } : {}),
       };
     },

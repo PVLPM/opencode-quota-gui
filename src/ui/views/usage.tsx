@@ -37,6 +37,13 @@ export function UsageView(props: {
         </span>
       </header>
 
+      <Show when={props.snapshot.historyUnavailable}>
+        <output class="qg-usage-view__notice">
+          Usage history could not be read. Existing observations are unavailable until the history
+          database is readable again.
+        </output>
+      </Show>
+
       <Show when={props.snapshot.activityUnavailable}>
         <output class="qg-usage-view__notice">
           Recorded activity is not ready for this range. Quota history is still valid, but model

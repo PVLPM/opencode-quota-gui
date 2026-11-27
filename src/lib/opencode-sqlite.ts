@@ -94,7 +94,7 @@ function createConn(db: NodeSqliteDatabase | BunSqliteDatabase): SqliteConn {
   };
 }
 
-async function openWithNodeSqlite(dbPath: string): Promise<SqliteConn> {
+async function openWithNodeSqlite(dbPath: string, busyTimeoutMs: number): Promise<SqliteConn> {
   const mod = (await import("node:sqlite")) as unknown as NodeSqliteModule;
   const db = new mod.DatabaseSync(dbPath, {
     readOnly: true,
@@ -105,21 +105,21 @@ async function openWithNodeSqlite(dbPath: string): Promise<SqliteConn> {
   // Keep reads deterministic and avoid accidental writes.
   runNodePragma(db, "PRAGMA query_only = ON;");
 
-  // Avoid transient SQLITE_BUSY errors (WAL).
-  runNodePragma(db, "PRAGMA busy_timeout = 5000;");
+  // Avoid transient SQLITE_BUSY errors (WAL); bounded by the caller.
+  runNodePragma(db, `PRAGMA busy_timeout = ${Math.max(0, Math.trunc(busyTimeoutMs))};`);
 
   return createConn(db);
 }
 
-async function openWithBunSqlite(dbPath: string): Promise<SqliteConn> {
+async function openWithBunSqlite(dbPath: string, busyTimeoutMs: number): Promise<SqliteConn> {
   const mod = (await import("bun:sqlite")) as unknown as BunSqliteModule;
   const db = new mod.Database(dbPath, { readonly: true });
 
   // Keep reads deterministic and avoid accidental writes.
   runBunPragma(db, "PRAGMA query_only = ON;");
 
-  // Avoid transient SQLITE_BUSY errors (WAL).
-  runBunPragma(db, "PRAGMA busy_timeout = 5000;");
+  // Avoid transient SQLITE_BUSY errors (WAL); bounded by the caller.
+  runBunPragma(db, `PRAGMA busy_timeout = ${Math.max(0, Math.trunc(busyTimeoutMs))};`);
 
   return createConn(db);
 }
@@ -224,11 +224,16 @@ async function openWritableWithBunSqlite(
 /**
  * Open OpenCode's SQLite database read-only.
  * Inside OpenCode 2 (Bun) this uses bun:sqlite; the Node CLI uses node:sqlite.
+ * Callers that must stay responsive pass a short busy timeout.
  */
-export async function openOpenCodeSqliteReadOnly(dbPath: string): Promise<SqliteConn> {
+export async function openOpenCodeSqliteReadOnly(
+  dbPath: string,
+  options: { busyTimeoutMs?: number } = {},
+): Promise<SqliteConn> {
+  const busyTimeoutMs = options.busyTimeoutMs ?? 5000;
   if ("Bun" in globalThis) {
-    return openWithBunSqlite(dbPath);
+    return openWithBunSqlite(dbPath, busyTimeoutMs);
   }
 
-  return openWithNodeSqlite(dbPath);
+  return openWithNodeSqlite(dbPath, busyTimeoutMs);
 }

@@ -199,4 +199,6 @@ export interface UsageSnapshot {
   }[];
   /** Activity history unavailable (analytics not ready); quota history still valid. */
   activityUnavailable?: true;
+  /** An existing usage-history database could not be read (not a fresh install). */
+  historyUnavailable?: true;
 }

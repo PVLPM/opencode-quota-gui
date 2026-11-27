@@ -3,7 +3,7 @@
  * per-range axes, labels and the activity-unavailable fallback.
  */
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -448,6 +448,22 @@ describe("usage snapshot: attribution", () => {
     expect(interval?.attributedBurnPercentPoints).toBe(0);
     expect(interval?.unattributedReason).toBe("unidentified-activity");
     expect(interval?.activity).toHaveLength(1);
+  });
+});
+
+describe("usage snapshot: history availability", () => {
+  it("distinguishes a fresh install from an unreadable history database", async () => {
+    const fresh = await build(undefined, { path: join(root, "missing.sqlite") }).usage({
+      range: "7d",
+    });
+    expect(fresh.historyUnavailable).toBeUndefined();
+    expect(fresh.accounts).toEqual([]);
+
+    await writeFile(path, "not a usage-history database");
+    const broken = await build(undefined, { path }).usage({ range: "7d" });
+    expect(broken.historyUnavailable).toBe(true);
+    expect(broken.accounts).toEqual([]);
+    expect(isUsageSnapshot(broken)).toBe(true);
   });
 });
 

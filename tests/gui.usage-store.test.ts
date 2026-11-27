@@ -22,6 +22,7 @@ import { createUsageRecorder } from "../src/gui/usage-recorder.js";
 import { openOpenCodeSqliteReadOnly } from "../src/lib/opencode-sqlite.js";
 import {
   openUsageStore,
+  USAGE_READ_BUSY_TIMEOUT_MS,
   type UsageCycleObservation,
   type UsageCycleSample,
   type UsageSeriesInfo,
@@ -938,6 +939,15 @@ describe("usage recorder: store recovery and lock carry-over", () => {
     expect(existsSync(nested)).toBe(true);
     const opened = await openUsageStore(nested);
     stores.push(opened);
+    // Read-only history opens must never inherit the 5 s writer default.
+    expect(USAGE_READ_BUSY_TIMEOUT_MS).toBeLessThanOrEqual(250);
+    const reader = await openOpenCodeSqliteReadOnly(nested, {
+      busyTimeoutMs: USAGE_READ_BUSY_TIMEOUT_MS,
+    });
+    expect(reader.get<{ timeout: number }>("PRAGMA busy_timeout")).toEqual({
+      timeout: USAGE_READ_BUSY_TIMEOUT_MS,
+    });
+    reader.close();
     // Both queued cycles are drained in order; the failed open lost nothing.
     expect(runsOf(opened, ROW_A).map((run) => run.remainingPercent)).toEqual([80, 70]);
     await recorder.close();

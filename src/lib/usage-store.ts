@@ -1631,10 +1631,21 @@ export async function openUsageStore(
   return createStore(conn, dbPath);
 }
 
+export const USAGE_READ_BUSY_TIMEOUT_MS = 250;
+
 /**
  * Open an existing usage-history database read-only. A missing file throws
  * (the caller decides whether that means "no history"); no schema is created.
+ * The dashboard read path must not stall behind another process's write lock.
  */
 export async function openUsageStoreReadOnly(dbPath: string): Promise<UsageReadStore> {
-  return createReader(await openOpenCodeSqliteReadOnly(dbPath));
+  const conn = await openOpenCodeSqliteReadOnly(dbPath, {
+    busyTimeoutMs: USAGE_READ_BUSY_TIMEOUT_MS,
+  });
+  try {
+    return createReader(conn);
+  } catch (error) {
+    conn.close();
+    throw error;
+  }
 }

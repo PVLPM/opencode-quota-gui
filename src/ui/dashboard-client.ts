@@ -1613,6 +1613,10 @@ export function parseUsageSnapshot(value: JsonValue, endpoint = "/api/v1/usage")
     };
     if (parsed.span.endMs < parsed.span.startMs) throw faulty(endpoint, "span");
   }
+  if (root.historyUnavailable !== undefined) {
+    if (root.historyUnavailable !== true) throw faulty(endpoint, "historyUnavailable");
+    parsed.historyUnavailable = true;
+  }
   if (root.activityUnavailable !== undefined) {
     if (root.activityUnavailable !== true) throw faulty(endpoint, "activityUnavailable");
     parsed.activityUnavailable = true;
