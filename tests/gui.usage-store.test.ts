@@ -264,6 +264,48 @@ describe("usage store: series identity and run compression", () => {
   });
 });
 
+describe("usage store: latest epoch reads", () => {
+  it("returns only the newest epoch, using replenishment and reset evidence", async () => {
+    const db = await store();
+    db.recordCycle(observation([sample(ROW_A, BASE, 90)]));
+    db.recordCycle(observation([sample(ROW_A, BASE + MINUTE, 80)], { collectorRunId: "run-2" }));
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 2 * MINUTE, 95)], { collectorRunId: "run-3" }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 3 * MINUTE, 90)], { collectorRunId: "run-4" }),
+    );
+
+    const beta = series(ROW_B, { providerLabel: "Beta" });
+    db.recordCycle(
+      observation([
+        sample(ROW_B, BASE, 50, {
+          series: beta,
+          resetAtMs: BASE + 30_000,
+        }),
+      ]),
+    );
+    db.recordCycle(
+      observation(
+        [
+          sample(ROW_B, BASE + MINUTE, 50, {
+            series: beta,
+            resetAtMs: BASE + 90_000,
+          }),
+        ],
+        { collectorRunId: "run-2" },
+      ),
+    );
+
+    const slice = db.queryLatestEpochs();
+    const runsOf = (rowId: string) =>
+      slice.runs.filter((run) => run.seriesId === rowId).map((run) => run.remainingPercent);
+    expect(runsOf(ROW_A)).toEqual([95, 90]);
+    expect(runsOf(ROW_B)).toEqual([50]);
+    expect(slice.runs.find((run) => run.seriesId === ROW_B)?.firstAtMs).toBe(BASE + MINUTE);
+  });
+});
+
 describe("usage store: interruptions and missing rows", () => {
   it("records retained, cooldown and error cards as run-length compressed evidence", async () => {
     const db = await store();

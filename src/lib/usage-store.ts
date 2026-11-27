@@ -12,7 +12,12 @@
  */
 import type { AccountingUnit } from "../contracts/dashboard.js";
 import type { UsageMeasurementKind, UsageSource } from "../contracts/usage.js";
-import { openOpenCodeSqliteWritable, type WritableSqliteConn } from "./opencode-sqlite.js";
+import {
+  openOpenCodeSqliteReadOnly,
+  openOpenCodeSqliteWritable,
+  type SqliteConn,
+  type WritableSqliteConn,
+} from "./opencode-sqlite.js";
 
 export const USAGE_HISTORY_SCHEMA_VERSION = 1;
 
@@ -153,12 +158,20 @@ export interface UsageHistorySlice {
   interruptions: UsageInterruptionRecord[];
 }
 
-export interface UsageStore {
+export interface UsageReadStore {
+  query(span: { startMs: number; endMs: number }): UsageHistorySlice;
+  /**
+   * Only the latest reset/identity epoch of every series: the walks back from
+   * the newest run through `usage_runs_series_time`, never a full scan.
+   */
+  queryLatestEpochs(): UsageHistorySlice;
+  close(): void;
+}
+
+export interface UsageStore extends UsageReadStore {
   readonly path: string;
   /** One full collector cycle; synchronous and single-transaction. */
   recordCycle(observation: UsageCycleObservation): void;
-  query(span: { startMs: number; endMs: number }): UsageHistorySlice;
-  close(): void;
 }
 
 interface SeriesRow {
@@ -177,7 +190,14 @@ interface SeriesRow {
   last_at_ms: number;
 }
 
-interface RunRow {
+interface RunRow extends RunReadRow {
+  collector_run_id: string;
+  collector_session_id: string;
+  collector_interval_ms: number;
+}
+
+/** Columns every reader needs; collector bookkeeping stays write-only. */
+interface RunReadRow {
   run_id: number;
   series_id: string;
   first_at_ms: number;
@@ -188,9 +208,6 @@ interface RunRow {
   quantity_unit_json: string | null;
   reset_at_ms: number | null;
   linked: number;
-  collector_run_id: string;
-  collector_session_id: string;
-  collector_interval_ms: number;
 }
 
 interface InterruptionRow {
@@ -203,8 +220,9 @@ interface InterruptionRow {
   count: number;
 }
 
-const RUN_COLUMNS =
-  "run_id, series_id, first_at_ms, last_at_ms, sample_count, remaining_percent, quantity_decimal, quantity_unit_json, reset_at_ms, linked, collector_run_id, collector_session_id, collector_interval_ms";
+const RUN_READ_COLUMNS =
+  "run_id, series_id, first_at_ms, last_at_ms, sample_count, remaining_percent, quantity_decimal, quantity_unit_json, reset_at_ms, linked";
+const RUN_COLUMNS = `${RUN_READ_COLUMNS}, collector_run_id, collector_session_id, collector_interval_ms`;
 
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => "?").join(", ");
@@ -228,7 +246,7 @@ function seriesRowToInfo(row: SeriesRow): UsageSeriesInfo {
   };
 }
 
-function runRowToStored(row: RunRow): UsageStoredRun {
+function runRowToStored(row: RunReadRow): UsageStoredRun {
   return {
     runId: row.run_id,
     seriesId: row.series_id,
@@ -307,7 +325,136 @@ function migrate(conn: WritableSqliteConn): void {
   }
 }
 
+const LATEST_EPOCH_PAGE = 256;
+
+/**
+ * True when `newer` starts a new reset/identity epoch relative to `older`.
+ * Mirrors the boundaries of `src/gui/usage-intervals.ts` D4. The walk-back is
+ * conservative: extra history before a missed boundary is harmless because the
+ * interval builder re-derives the latest epoch from the returned points.
+ */
+function startsNewEpoch(older: RunReadRow, newer: RunReadRow): boolean {
+  if (older.quantity_unit_json !== newer.quantity_unit_json) return true;
+  if (newer.remaining_percent > older.remaining_percent) return true;
+  return (
+    older.reset_at_ms !== null &&
+    newer.reset_at_ms !== null &&
+    older.last_at_ms <= older.reset_at_ms &&
+    newer.first_at_ms >= older.reset_at_ms &&
+    newer.reset_at_ms > older.reset_at_ms
+  );
+}
+
+/** Newest run first, stopping at the first boundary; uses the series-time index. */
+function latestEpochRuns(conn: SqliteConn, seriesId: string): RunReadRow[] {
+  const descending: RunReadRow[] = [];
+  let cursor: { firstAtMs: number; runId: number } | undefined;
+  for (;;) {
+    const page =
+      cursor === undefined
+        ? conn.all<RunReadRow>(
+            `SELECT ${RUN_READ_COLUMNS} FROM usage_runs WHERE series_id = ?
+             ORDER BY first_at_ms DESC, run_id DESC LIMIT ?`,
+            [seriesId, LATEST_EPOCH_PAGE],
+          )
+        : conn.all<RunReadRow>(
+            `SELECT ${RUN_READ_COLUMNS} FROM usage_runs
+             WHERE series_id = ? AND (first_at_ms < ? OR (first_at_ms = ? AND run_id < ?))
+             ORDER BY first_at_ms DESC, run_id DESC LIMIT ?`,
+            [seriesId, cursor.firstAtMs, cursor.firstAtMs, cursor.runId, LATEST_EPOCH_PAGE],
+          );
+    for (const row of page) {
+      const newer = descending[descending.length - 1];
+      if (newer !== undefined && startsNewEpoch(row, newer)) return descending.reverse();
+      descending.push(row);
+    }
+    const last = page[page.length - 1];
+    if (page.length < LATEST_EPOCH_PAGE || last === undefined) return descending.reverse();
+    cursor = { firstAtMs: last.first_at_ms, runId: last.run_id };
+  }
+}
+
+/** Read-only queries shared by the writer store and the dashboard read path. */
+function createReader(conn: SqliteConn): UsageReadStore {
+  function query(span: { startMs: number; endMs: number }): UsageHistorySlice {
+    const startMs = Math.min(span.startMs, span.endMs);
+    const endMs = Math.max(span.startMs, span.endMs);
+    const runs = conn.all<RunReadRow>(
+      `SELECT ${RUN_READ_COLUMNS} FROM usage_runs
+       WHERE last_at_ms >= ? AND first_at_ms <= ?
+       ORDER BY series_id, first_at_ms, last_at_ms, run_id`,
+      [startMs, endMs],
+    );
+    const seriesIds = [...new Set(runs.map((run) => run.series_id))];
+    const seriesById = new Map<string, UsageSeriesInfo>();
+    if (seriesIds.length > 0) {
+      const rows = conn.all<SeriesRow>(
+        `SELECT * FROM usage_series WHERE series_id IN (${placeholders(seriesIds.length)})`,
+        seriesIds,
+      );
+      for (const row of rows) seriesById.set(row.series_id, seriesRowToInfo(row));
+    }
+    const preceding: UsageStoredRun[] = [];
+    for (const seriesId of seriesIds) {
+      const row = conn.get<RunReadRow>(
+        `SELECT ${RUN_READ_COLUMNS} FROM usage_runs
+         WHERE series_id = ? AND last_at_ms < ?
+         ORDER BY last_at_ms DESC, run_id DESC LIMIT 1`,
+        [seriesId, startMs],
+      );
+      if (row !== null) preceding.push(runRowToStored(row));
+    }
+    const interruptions = conn.all<InterruptionRow>(
+      `SELECT interruption_id, card_id, provider_id, kind, first_at_ms, last_at_ms, count
+       FROM usage_interruptions
+       WHERE last_at_ms >= ? AND first_at_ms <= ?
+       ORDER BY first_at_ms, interruption_id`,
+      [startMs, endMs],
+    );
+    return {
+      series: seriesIds.flatMap((seriesId) => {
+        const info = seriesById.get(seriesId);
+        return info === undefined ? [] : [info];
+      }),
+      runs: runs.map(runRowToStored),
+      preceding,
+      interruptions: interruptions.map((row) => ({
+        interruptionId: row.interruption_id,
+        cardId: row.card_id,
+        providerId: row.provider_id,
+        kind: row.kind as UsageInterruptionKind,
+        firstAtMs: row.first_at_ms,
+        lastAtMs: row.last_at_ms,
+        count: row.count,
+      })),
+    };
+  }
+
+  function queryLatestEpochs(): UsageHistorySlice {
+    const series: UsageSeriesInfo[] = [];
+    const runs: UsageStoredRun[] = [];
+    const rows = conn.all<SeriesRow>("SELECT * FROM usage_series ORDER BY card_id, series_id");
+    for (const row of rows) {
+      const latest = latestEpochRuns(conn, row.series_id);
+      if (latest.length === 0) continue;
+      series.push(seriesRowToInfo(row));
+      for (const run of latest) runs.push(runRowToStored(run));
+    }
+    return { series, runs, preceding: [], interruptions: [] };
+  }
+
+  return {
+    query,
+    queryLatestEpochs,
+    close() {
+      conn.close();
+    },
+  };
+}
+
 function createStore(conn: WritableSqliteConn, path: string): UsageStore {
+  const reader = createReader(conn);
+
   function latestRun(seriesId: string): RunRow | null {
     return conn.get<RunRow>(
       `SELECT ${RUN_COLUMNS} FROM usage_runs WHERE series_id = ? ORDER BY first_at_ms DESC, run_id DESC LIMIT 1`,
@@ -628,64 +775,11 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     }
   }
 
-  function query(span: { startMs: number; endMs: number }): UsageHistorySlice {
-    const startMs = Math.min(span.startMs, span.endMs);
-    const endMs = Math.max(span.startMs, span.endMs);
-    const runs = conn.all<RunRow>(
-      `SELECT ${RUN_COLUMNS} FROM usage_runs
-       WHERE last_at_ms >= ? AND first_at_ms <= ?
-       ORDER BY series_id, first_at_ms, last_at_ms, run_id`,
-      [startMs, endMs],
-    );
-    const seriesIds = [...new Set(runs.map((run) => run.series_id))];
-    const seriesById = new Map<string, UsageSeriesInfo>();
-    if (seriesIds.length > 0) {
-      const rows = conn.all<SeriesRow>(
-        `SELECT * FROM usage_series WHERE series_id IN (${placeholders(seriesIds.length)})`,
-        seriesIds,
-      );
-      for (const row of rows) seriesById.set(row.series_id, seriesRowToInfo(row));
-    }
-    const preceding: UsageStoredRun[] = [];
-    for (const seriesId of seriesIds) {
-      const row = conn.get<RunRow>(
-        `SELECT ${RUN_COLUMNS} FROM usage_runs
-         WHERE series_id = ? AND last_at_ms < ?
-         ORDER BY last_at_ms DESC, run_id DESC LIMIT 1`,
-        [seriesId, startMs],
-      );
-      if (row !== null) preceding.push(runRowToStored(row));
-    }
-    const interruptions = conn.all<InterruptionRow>(
-      `SELECT interruption_id, card_id, provider_id, kind, first_at_ms, last_at_ms, count
-       FROM usage_interruptions
-       WHERE last_at_ms >= ? AND first_at_ms <= ?
-       ORDER BY first_at_ms, interruption_id`,
-      [startMs, endMs],
-    );
-    return {
-      series: seriesIds.flatMap((seriesId) => {
-        const info = seriesById.get(seriesId);
-        return info === undefined ? [] : [info];
-      }),
-      runs: runs.map(runRowToStored),
-      preceding,
-      interruptions: interruptions.map((row) => ({
-        interruptionId: row.interruption_id,
-        cardId: row.card_id,
-        providerId: row.provider_id,
-        kind: row.kind as UsageInterruptionKind,
-        firstAtMs: row.first_at_ms,
-        lastAtMs: row.last_at_ms,
-        count: row.count,
-      })),
-    };
-  }
-
   return {
     path,
     recordCycle,
-    query,
+    query: reader.query,
+    queryLatestEpochs: reader.queryLatestEpochs,
     close() {
       conn.close();
     },
@@ -701,4 +795,12 @@ export async function openUsageStore(dbPath: string): Promise<UsageStore> {
     throw error;
   }
   return createStore(conn, dbPath);
+}
+
+/**
+ * Open an existing usage-history database read-only. A missing file throws
+ * (the caller decides whether that means "no history"); no schema is created.
+ */
+export async function openUsageStoreReadOnly(dbPath: string): Promise<UsageReadStore> {
+  return createReader(await openOpenCodeSqliteReadOnly(dbPath));
 }

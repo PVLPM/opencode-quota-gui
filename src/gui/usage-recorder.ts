@@ -21,7 +21,7 @@ import {
 import { createGuiLogger, type GuiLogger } from "./log.js";
 import { isLiveQuotaObservation, quotaObservationCycle } from "./quota-observation.js";
 
-const USAGE_HISTORY_FILE = "usage-history.sqlite";
+export const USAGE_HISTORY_FILE = "usage-history.sqlite";
 const DEFAULT_INTERVAL_MS = 60_000;
 
 export interface UsageRecorderOptions {
