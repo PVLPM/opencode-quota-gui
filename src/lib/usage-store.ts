@@ -11,7 +11,7 @@
  * aggregated runs: a split leaves two rows sharing an endpoint.
  */
 import type { AccountingMetric, AccountingUnit, CostedTokens } from "../contracts/dashboard.js";
-import type { UsageMeasurementKind, UsageSource } from "../contracts/usage.js";
+import type { UsageMeasurementKind, UsageResetPrecision, UsageSource } from "../contracts/usage.js";
 import type {
   UsageActivityEntry,
   UsageActivityQuery,
@@ -26,7 +26,7 @@ import {
 import { hashQuotaCardIdentity } from "./quota-identity.js";
 import { type PricingResolution, priceTokenBuckets } from "./quota-stats.js";
 import { type TokenBuckets, totalTokenBuckets } from "./token-buckets.js";
-import type { UsageImportTokens, UsageResetPrecision } from "./usage-import.js";
+import type { UsageImportTokens } from "./usage-import.js";
 
 export const USAGE_HISTORY_SCHEMA_VERSION = 4;
 

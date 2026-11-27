@@ -35,6 +35,9 @@ export type UsageSource = "opencode-poll" | "codex-import";
  */
 export type UsageMeasurementKind = "provider-observed" | "locally-estimated";
 
+/** A provider-supplied absolute reset timestamp versus a relative estimate. */
+export type UsageResetPrecision = "exact" | "estimated";
+
 /**
  * One stored run: one or more consecutive identical successful measurements of
  * the same series and epoch. `startMs` is the first sample, `endMs` the last

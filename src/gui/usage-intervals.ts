@@ -21,13 +21,11 @@ import type {
   UsageMeasurementKind,
   UsagePoint,
   UsageRangeKey,
+  UsageResetPrecision,
   UsageSource,
   UsageWindowSeries,
 } from "../contracts/usage.js";
 import type { UsageStoredRun } from "../lib/usage-store.js";
-
-/** `exact` = provider-reported reset timestamp; `estimated` = now + offset. */
-export type UsageResetPrecision = "exact" | "estimated";
 
 /** Store rows may already carry the recorder's precision column. */
 type UsageStoredRunWithPrecision = UsageStoredRun & { reset_precision?: UsageResetPrecision };

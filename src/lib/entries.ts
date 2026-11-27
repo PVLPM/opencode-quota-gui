@@ -5,6 +5,7 @@ import type {
   ProviderFailureCategory,
   QuotaAttemptOutcome,
 } from "../contracts/provider-failure.js";
+import type { UsageResetPrecision } from "../contracts/usage.js";
 import type { QuotaProviderDefinition } from "./quota-providers.js";
 import type { QuotaTelemetryToken } from "./quota-telemetry.js";
 import type { ResolvedAuthIdentity } from "./resolved-auth-identity.js";
@@ -184,7 +185,7 @@ export type QuotaPercentEntry = GroupedQuotaEntryMeta & {
    * provider timestamp (`exact`) or a local now+offset derivation (`estimated`).
    * Absent means unknown and is treated as exact for backward compatibility.
    */
-  resetPrecision?: "exact" | "estimated";
+  resetPrecision?: UsageResetPrecision;
   /** Internal provider evidence for fixed-window exhaustion projection. */
   fixedWindow?: FixedWindowProjectionEvidence;
   /** Presentation-only projection. Provider caches must never persist this field. */

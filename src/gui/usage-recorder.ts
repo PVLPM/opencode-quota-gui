@@ -453,12 +453,12 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
         await chain;
         await importChain;
         await importer?.flush();
-        const pending = storePromise;
+        const pendingStore = storePromise;
         storePromise = undefined;
-        if (pending === undefined) return;
+        if (pendingStore === undefined) return;
         let target: UsageStore | undefined;
         try {
-          target = await pending;
+          target = await pendingStore;
         } catch {
           return;
         }
