@@ -13,21 +13,24 @@ import {
 } from "solid-js";
 import type { AnalyticsDimension, QuotaSnapshot } from "../contracts/dashboard";
 import { isRangeKey, RANGE_KEYS } from "../contracts/ranges";
+import { isUsageRangeKey, USAGE_RANGE_KEYS, type UsageRangeKey } from "../contracts/usage";
 import type { DashboardRpcViewScope } from "../rpc.js";
 import { createAnalyticsPresentationStore } from "../ui/analytics-cache";
 import { AnalyticsTabs } from "../ui/components/analytics-tabs";
 import { BuildMismatchStatus } from "../ui/components/build-info";
 import { AnalyticsIcon, QuotaIcon } from "../ui/components/icons";
+import { QuotaUsageTabs } from "../ui/components/quota-usage-tabs";
 import { RangeLabel } from "../ui/components/range-label";
 import { ErrorCard, ReloadRequired } from "../ui/components/states";
 import { TemporalStatusStrip } from "../ui/components/temporal-status";
-import { RANGE_LABELS } from "../ui/format";
+import { RANGE_LABELS, USAGE_RANGE_LABELS } from "../ui/format";
 import { analyticsTabForRoute, isInternalDashboardHref } from "../ui/navigation-model";
-import { AnalyticsViews, QuotaRoute } from "../ui/routes";
+import { AnalyticsViews, QuotaRoute, UsageRoute } from "../ui/routes";
 import {
   formatPath,
   type Location,
   modelsGroupForRoute,
+  type Route,
   routeShowsRangeSelector,
 } from "../ui/routing";
 import { displayPreferencesFromValues } from "../ui/settings-model";
@@ -96,6 +99,10 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
 
   const route = () => location().route;
   const range = () => location().range;
+  const usageRoute = (): Extract<Route, { name: "usage" }> | undefined => {
+    const current = route();
+    return current.name === "usage" ? current : undefined;
+  };
   const analyticsTab = () => analyticsTabForRoute(route());
   const modelsDimension = () => modelsGroupForRoute(route());
   const routeKey = createMemo(() => JSON.stringify(route()));
@@ -179,6 +186,10 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
 
   function updateRange(next: (typeof RANGE_KEYS)[number]): void {
     setLocation(setNativeRange(location(), next));
+  }
+
+  function updateUsageRange(next: UsageRangeKey): void {
+    navigate(formatPath({ name: "usage", usageRange: next }, range()));
   }
 
   const staleLabel = () => {
@@ -293,9 +304,16 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
               <Show
                 when={analyticsTab()}
                 fallback={
-                  <span class="qg-frame-tab">
-                    {route().name === "home" ? "Quota" : "Dashboard"}
-                  </span>
+                  <Show
+                    when={route().name === "home" || route().name === "usage"}
+                    fallback={<span class="qg-frame-tab">Dashboard</span>}
+                  >
+                    <QuotaUsageTabs
+                      active={route().name === "usage" ? "usage" : "quota"}
+                      range={range()}
+                      usageRange={usageRoute()?.usageRange}
+                    />
+                  </Show>
                 }
               >
                 {(tab) => (
@@ -314,6 +332,26 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                     providers={temporal().providers}
                     overrides={panel.preferences()?.temporalProviderOverrides ?? {}}
                   />
+                )}
+              </Show>
+              <Show when={usageRoute()}>
+                {(currentUsage) => (
+                  <SegmentedControl
+                    class="qg-range qg-usage-range"
+                    aria-label="Usage range"
+                    value={currentUsage().usageRange}
+                    onChange={(value) => {
+                      if (isUsageRangeKey(value)) updateUsageRange(value);
+                    }}
+                  >
+                    <For each={USAGE_RANGE_KEYS}>
+                      {(key) => (
+                        <SegmentedControlItem value={key}>
+                          {USAGE_RANGE_LABELS[key] ?? key}
+                        </SegmentedControlItem>
+                      )}
+                    </For>
+                  </SegmentedControl>
                 )}
               </Show>
               <Show when={routeShowsRangeSelector(route())}>
@@ -386,6 +424,21 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                       />
                     )}
                   </Show>
+                </Match>
+
+                <Match when={usageRoute()}>
+                  {(currentUsage) => (
+                    <UsageRoute
+                      client={props.client}
+                      route={currentUsage()}
+                      reloadToken={panel.quotaReloadToken()}
+                      reconnectEpoch={panel.reconnectEpoch()}
+                      enabled={props.visible}
+                      onFresh={panel.markFresh}
+                      preferences={displayPreferencesFromValues(panel.settings()?.values ?? {})}
+                      onStale={setRouteStale}
+                    />
+                  )}
                 </Match>
 
                 <Match when={analyticsTab() !== undefined}>

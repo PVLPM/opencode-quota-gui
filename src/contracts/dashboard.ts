@@ -4,6 +4,7 @@ import type { BankedResetAvailability } from "./openai-quota.js";
 import type { ProviderFailureCategory, QuotaAttemptOutcome } from "./provider-failure.js";
 import type { BucketUnit, RangeKey, RangeWindow } from "./ranges.js";
 import type { TemporalStatusSnapshot } from "./temporal.js";
+import type { UsageQuery, UsageSnapshot } from "./usage.js";
 
 /**
  * Frozen GUI contracts (design spec §5.1–§5.4).
@@ -640,6 +641,11 @@ export interface DashboardDataSource {
   health(): Promise<DashboardHealth>;
   home(input: { range: RangeKey; exact?: boolean; background?: boolean }): Promise<HomeSnapshot>;
   quota(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
+  /**
+   * Local observation history (v1.4.0). A read never performs a provider
+   * request; it is served from the stored history the existing poll captured.
+   */
+  usage(input: UsageQuery): Promise<UsageSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
   /** Range-certified grouped model/provider analytics (one exact query). */

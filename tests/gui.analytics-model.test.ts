@@ -3555,10 +3555,10 @@ describe("analytics model: interval activity", () => {
     expect(result.intervals[0]?.entries[0]?.providerId).toBe("zero-labs");
   });
 
-  it("skips steps without a non-empty provider or model identity", () => {
+  it("counts matching-provider steps without a model as unidentified and empty-provider steps as unmatched", () => {
     const at = NOW - 2 * HOUR;
     const result = activity(
-      { intervals: [{ startMs: at - HOUR, endMs: at }], providerIds: ["zero-labs", ""] },
+      { intervals: [{ startMs: at - HOUR, endMs: at }], providerIds: ["zero-labs"] },
       [
         row({
           sessionID: "ses_activity_a",
@@ -3587,8 +3587,14 @@ describe("analytics model: interval activity", () => {
       ],
     );
 
-    expect(result.intervals[0]?.entries).toHaveLength(1);
-    expect(result.intervals[0]?.entries[0]?.tokens.input).toBe(300);
+    const interval = result.intervals[0];
+    expect(interval?.entries).toHaveLength(1);
+    expect(interval?.entries[0]?.tokens.input).toBe(300);
+    expect(interval?.incomplete).toBe(true);
+    expect(interval?.unidentifiedTokens).toBe(200);
+    expect(interval?.unidentifiedSteps).toBe(1);
+    expect(interval?.unmatchedTokens).toBe(100);
+    expect(interval?.unmatchedSteps).toBe(1);
   });
 
   it("assigns steps to the half-open interval (startMs, endMs] and across a model switch", () => {

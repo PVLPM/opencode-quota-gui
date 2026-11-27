@@ -26,6 +26,7 @@ import {
   type JsonValue,
 } from "../contracts/dashboard.js";
 import { DEFAULT_RANGE_KEY, isRangeKey, type RangeKey } from "../contracts/ranges.js";
+import { isUsageRangeKey, type UsageRangeKey } from "../contracts/usage.js";
 import { GuiSettingsError } from "./config.js";
 import {
   DASHBOARD_ERROR_MESSAGES,
@@ -306,6 +307,12 @@ function parseRange(url: URL): RangeKey | undefined {
   return isRangeKey(raw) ? raw : undefined;
 }
 
+function parseUsageRange(url: URL): UsageRangeKey | undefined {
+  const raw = url.searchParams.get("range");
+  if (raw === null) return "current";
+  return isUsageRangeKey(raw) ? raw : undefined;
+}
+
 /** `/models` plus exact `/model|provider/<canonical entity token>` direct links. */
 function isAnalyticsUiPath(pathname: string): boolean {
   if (pathname === "/models") return true;
@@ -322,7 +329,7 @@ function isAnalyticsUiPath(pathname: string): boolean {
 
 /** Known UI paths only: never reinterpret an asset or malformed id as HTML. */
 function isUiPath(pathname: string): boolean {
-  if (["/", "/quota", "/analytics", "/settings"].includes(pathname)) return true;
+  if (["/", "/quota", "/usage", "/analytics", "/settings"].includes(pathname)) return true;
   if (isAnalyticsUiPath(pathname)) return true;
   const match = /^\/(?:project|session)\/([^/]+)$/.exec(pathname);
   if (!match) return false;
@@ -542,6 +549,20 @@ export function createDashboardServer(
         200,
         await snapshots.quota(req.method === "POST" ? { refresh: true } : undefined),
       );
+      return;
+    }
+
+    if (rest.length === 1 && rest[0] === "usage") {
+      if (!requireMethods(req, res, ["GET", "HEAD"])) return;
+      const range = parseUsageRange(url);
+      if (range === undefined) {
+        sendError(res, "bad-request");
+        return;
+      }
+      // Usage is part of the Quota area: it keeps the provider poller's
+      // already-collected history and never asks analytics to refresh.
+      snapshots.setViewScope("quota", "request");
+      sendJson(res, 200, await snapshots.usage({ range }));
       return;
     }
 
