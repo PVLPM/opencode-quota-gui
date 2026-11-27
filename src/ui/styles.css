@@ -3656,11 +3656,14 @@
   overflow-wrap: anywhere;
 }
 
+/* The library's weak warning surface is pale even in the app's dark theme, so
+   white-on-cream would vanish. Match the range-failure notice: raised dark
+   surface, semantic border, secondary text. */
 .qg-usage-view__notice {
   padding: 10px 12px;
   border: 1px solid var(--qg-warning-border);
   border-radius: var(--qg-radius);
-  background: var(--qg-warning-surface);
+  background: var(--qg-surface-raised);
   color: var(--qg-text-secondary);
 }
 
@@ -3771,6 +3774,13 @@
   line-height: 1.45;
 }
 
+/* A window plot is shorter than an inspected step's tooltip. The shared tooltip
+   keeps itself inside the scroller; the panel must not clip that overlay back
+   at the plot's edge. Nothing else in this panel relies on the clip. */
+.qg-usage-window .qg-chart-shell__panel {
+  overflow: visible;
+}
+
 .qg-usage-badge {
   display: inline-flex;
   align-items: center;
@@ -3855,13 +3865,41 @@
   font-weight: 550;
 }
 
+/* The window tooltip has no swatch column, so its label/value rows own the
+   full width. Long state and disclosure sentences wrap instead of trailing
+   into an ellipsis. */
+.qg-usage-chart__tooltip .qg-tooltip__group--series {
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: baseline;
+}
+
+/* The date range alone can fill the tooltip; wrap the interval state onto its
+   own line instead of letting both phrases break mid-word beside each other. */
+.qg-usage-chart__tooltip .qg-tooltip__head {
+  flex-wrap: wrap;
+  gap: 2px 12px;
+}
+
+.qg-usage-chart__tooltip .qg-tooltip__note {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* One activity line per model: identity first, then its own metrics. Without
+   the wrap the identity and the numbers collide in one run-on line. */
 .qg-usage-chart__activity {
-  gap: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
 }
 
 .qg-usage-chart__activity-model {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.qg-usage-chart__activity .qg-totals__value {
+  margin-left: 0;
 }
 
 .qg-usage-legend__marker {
@@ -3939,16 +3977,41 @@
   background: var(--qg-surface);
 }
 
+/* A grid summary cannot keep the native disclosure marker, so the row draws
+   its own chevron in the left gutter and the label column starts after it. */
 .qg-usage-breakdown__model > summary {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr);
   gap: 4px 14px;
   align-items: baseline;
-  padding: 10px 12px;
+  padding: 10px 12px 10px 26px;
   cursor: pointer;
-  list-style-position: inside;
   color: var(--qg-text-secondary);
   font-size: var(--font-size-small);
+}
+
+.qg-usage-breakdown__model > summary::before {
+  content: "";
+  position: absolute;
+  top: 20px;
+  left: 13px;
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid var(--qg-text-muted);
+  border-bottom: 1.5px solid var(--qg-text-muted);
+  transform: translateY(-50%) rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.qg-usage-breakdown__model[open] > summary::before {
+  transform: translateY(-50%) rotate(45deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qg-usage-breakdown__model > summary::before {
+    transition: none;
+  }
 }
 
 .qg-usage-breakdown__model > summary:focus-visible {
@@ -3979,9 +4042,12 @@
   padding: 0 12px 12px;
 }
 
+/* Same track ratios and content start as the model summary: a child's token,
+   cost and attribution columns stay under its parent's instead of stepping
+   inward with the indent. */
 .qg-usage-breakdown__effort {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr);
   gap: 4px 14px;
   padding: 6px 0 0 14px;
   border-top: 1px dashed var(--qg-border);
@@ -3990,16 +4056,20 @@
 }
 
 .qg-usage-breakdown__effort-name {
+  padding-left: 14px;
   color: var(--qg-text-secondary);
   overflow-wrap: anywhere;
 }
 
 .qg-usage-breakdown__effort .qg-usage-breakdown__meta {
   grid-column: 1 / -1;
+  padding-left: 14px;
 }
 
+/* Inline so the step count and its token categories share one sentence
+   instead of the block-level list breaking after the separator. */
 .qg-usage-breakdown__categories {
-  display: flex;
+  display: inline-flex;
   gap: 4px 10px;
   flex-wrap: wrap;
 }
