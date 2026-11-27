@@ -10,8 +10,8 @@ import {
   hashUsageImport,
   listJsonlFiles,
   readIncrementalJsonlFile,
+  readJsonlFilesWithBudget,
   type UsageImportTokens,
-  usageImportFileKey,
 } from "./usage-import.js";
 
 /**
@@ -95,6 +95,8 @@ export interface CodexHistoryReadInput {
   /** CODEX_HOME. The resolver below derives it from the environment or home directory. */
   root?: string;
   cursor?: CodexImportCursor;
+  /** Per-run byte budget; unread files keep their prior cursor. */
+  maxBytes?: number;
 }
 
 interface CodexRateLimitWindow {
@@ -534,24 +536,25 @@ export async function readCodexHistory(
   ]);
   const paths = [...(sessions ?? []), ...(archived ?? [])].sort();
   const accumulator = createCodexAccumulator();
-  const nextFiles: Record<string, CodexFileCursor> = {};
-
-  for (const path of paths) {
-    const key = usageImportFileKey(path);
-    const cursor = await readIncrementalJsonlFile<CodexFileCursor, CodexParseState>({
-      path,
-      prior: previous.files[key],
-      state: (prior) => parseStateFromCursor(prior),
-      onLine: (line, state) => applyCodexLine(line, state, accumulator),
-      toCursor: (state, stats, byteOffset) => ({
-        ...state,
-        size: stats.size,
-        mtimeMs: stats.mtimeMs,
-        byteOffset,
+  const nextFiles = await readJsonlFilesWithBudget<CodexFileCursor>({
+    paths,
+    previous: previous.files,
+    ...(input.maxBytes !== undefined ? { maxBytes: input.maxBytes } : {}),
+    read: (path, prior, budget) =>
+      readIncrementalJsonlFile<CodexFileCursor, CodexParseState>({
+        path,
+        prior,
+        state: (statePrior) => parseStateFromCursor(statePrior),
+        onLine: (line, state) => applyCodexLine(line, state, accumulator),
+        toCursor: (state, stats, byteOffset) => ({
+          ...state,
+          size: stats.size,
+          mtimeMs: stats.mtimeMs,
+          byteOffset,
+        }),
+        ...(budget !== undefined ? { budget } : {}),
       }),
-    });
-    if (cursor !== undefined) nextFiles[key] = cursor;
-  }
+  });
 
   return {
     available: true,

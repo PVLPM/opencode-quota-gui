@@ -92,17 +92,30 @@ async function collectJsonlFiles(
 const READ_CHUNK_BYTES = 64 * 1024;
 /** A single JSONL record larger than this is skipped rather than buffered whole. */
 const MAX_LINE_BYTES = 8 * 1024 * 1024;
+/** One harness reads at most this much newly appended transcript data per opportunity. */
+export const USAGE_IMPORT_READ_BUDGET_BYTES = 16 * 1024 * 1024;
+
+/**
+ * A shared byte budget for one import run; callers stop starting new files at 0.
+ * `readIncrementalJsonlFile` spends it and always stops on a line boundary.
+ */
+export interface UsageImportReadBudget {
+  remainingBytes: number;
+}
 
 /**
  * Reads complete lines in `[startOffset, endOffset)` and returns the offset just
  * after the last newline. A partially written trailing line is left for the next
- * run. Chunked reads keep memory independent of file size.
+ * run. Chunked reads keep memory independent of file size. With `maxBytes`, the
+ * read stops after the budget is spent, but only once a complete line was seen;
+ * a single pathological line may therefore exceed it rather than stall forever.
  */
 export async function readAppendedJsonLines(
   path: string,
   startOffset: number,
   endOffset: number,
   onLine: (line: string) => void,
+  maxBytes?: number,
 ): Promise<number> {
   if (!Number.isFinite(startOffset) || startOffset < 0 || endOffset <= startOffset) {
     return startOffset;
@@ -116,6 +129,8 @@ export async function readAppendedJsonLines(
     const end = Math.min(endOffset, stats.size);
     if (end <= startOffset) return startOffset;
 
+    const softLimit =
+      maxBytes === undefined ? end : Math.min(end, startOffset + Math.max(0, maxBytes));
     const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
     let position = startOffset;
     let lastNewline = startOffset;
@@ -154,6 +169,7 @@ export async function readAppendedJsonLines(
         start = newline + 1;
       }
       position += bytesRead;
+      if (position >= softLimit && lastNewline > startOffset) break;
     }
     return lastNewline;
   } finally {
@@ -178,6 +194,8 @@ export interface IncrementalJsonlRead<TCursor extends IncrementalJsonlCursor, TS
     stats: { size: number; mtimeMs: number },
     byteOffset: number,
   ) => TCursor;
+  /** Optional per-run byte budget; consumed by bytes actually read. */
+  budget?: UsageImportReadBudget;
 }
 
 /**
@@ -199,12 +217,48 @@ export async function readIncrementalJsonlFile<TCursor extends IncrementalJsonlC
   let nextOffset = start;
   if (start < stats.size) {
     try {
-      nextOffset = await readAppendedJsonLines(read.path, start, stats.size, (line) =>
-        read.onLine(line, state),
+      nextOffset = await readAppendedJsonLines(
+        read.path,
+        start,
+        stats.size,
+        (line) => read.onLine(line, state),
+        read.budget?.remainingBytes,
       );
     } catch {
       return read.prior;
     }
   }
+  if (read.budget !== undefined) read.budget.remainingBytes -= nextOffset - start;
   return read.toCursor(state, stats, nextOffset);
+}
+
+/**
+ * Reads a harness's discovered files while sharing one per-run budget. Files
+ * reached after the budget is spent keep their previous cursor, so a later
+ * opportunity resumes instead of restarting them.
+ */
+export async function readJsonlFilesWithBudget<TCursor extends IncrementalJsonlCursor>(input: {
+  paths: readonly string[];
+  previous: Readonly<Record<string, TCursor>>;
+  maxBytes?: number;
+  read: (
+    path: string,
+    prior: TCursor | undefined,
+    budget: UsageImportReadBudget | undefined,
+  ) => Promise<TCursor | undefined>;
+}): Promise<Record<string, TCursor>> {
+  const budget =
+    input.maxBytes === undefined ? undefined : { remainingBytes: Math.max(0, input.maxBytes) };
+  const next: Record<string, TCursor> = {};
+  for (const path of input.paths) {
+    const key = usageImportFileKey(path);
+    if (budget !== undefined && budget.remainingBytes <= 0) {
+      const prior = input.previous[key];
+      if (prior !== undefined) next[key] = prior;
+      continue;
+    }
+    const cursor = await input.read(path, input.previous[key], budget);
+    if (cursor !== undefined) next[key] = cursor;
+  }
+  return next;
 }
