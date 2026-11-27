@@ -9,6 +9,7 @@ import {
   buildUsageWindowSeries,
   type UsageSamplePoint,
   type UsageSeriesInput,
+  usagePointsFromRuns,
 } from "../src/gui/usage-intervals.js";
 
 const BASE = Date.parse("2026-01-01T00:00:00.000Z");
@@ -45,8 +46,8 @@ describe("usage intervals: reset proof", () => {
 
     const lifetime = buildUsageWindowSeries(series(points), { range: "lifetime", nowMs: at(250) });
     expect(lifetime.links).toEqual([{ kind: "boundary", boundary: "reset", atMs: at(120) }]);
-    expect(lifetime.intervals).toHaveLength(1);
-    expect(lifetime.intervals[0]?.burnPercentPoints).toBeNull();
+    expect(lifetime.intervals.filter((interval) => interval.link === "boundary")).toHaveLength(1);
+    expect(lifetime.intervals.map((interval) => interval.burnPercentPoints)).toEqual([0, null, 0]);
     expect(lifetime.totals.observedBurnPercentPoints).toBe(0);
 
     const current = buildUsageWindowSeries(series(points), { range: "current", nowMs: at(250) });
@@ -81,7 +82,9 @@ describe("usage intervals: reset proof", () => {
       boundary: "reset",
       atMs: BASE + 100 * SECOND,
     });
-    expect(window.intervals[0]?.burnPercentPoints).toBeNull();
+    expect(
+      window.intervals.find((interval) => interval.link === "boundary")?.burnPercentPoints,
+    ).toBeNull();
   });
 
   it("does not prove a reset before the earlier boundary", () => {
@@ -134,6 +137,270 @@ describe("usage intervals: reset proof", () => {
       { range: "lifetime", nowMs: BASE + 60 * SECOND },
     );
     expect(window.links[0]).toEqual({ kind: "boundary", boundary: "identity-change" });
+  });
+});
+
+describe("usage intervals: estimated reset precision", () => {
+  const at = (seconds: number): number => BASE + seconds * SECOND;
+
+  it("proves an estimated rollover without placing an exact marker", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({
+          firstAtMs: at(0),
+          lastAtMs: at(60),
+          remainingPercent: 80,
+          resetAtMs: at(120),
+          resetPrecision: "estimated",
+        }),
+        point({
+          firstAtMs: at(180),
+          lastAtMs: at(240),
+          remainingPercent: 95,
+          resetAtMs: at(300),
+          resetPrecision: "estimated",
+        }),
+      ]),
+      { range: "lifetime", nowMs: at(250) },
+    );
+
+    expect(window.links[0]).toEqual({ kind: "boundary", boundary: "reset" });
+    expect(window.links[0]).not.toHaveProperty("atMs");
+    expect(window.totals.observedBurnPercentPoints).toBe(0);
+  });
+
+  it("ignores forward jitter that crosses the earlier estimate without a rollover", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({
+          firstAtMs: at(0),
+          lastAtMs: at(60),
+          remainingPercent: 80,
+          resetAtMs: at(120),
+          resetPrecision: "estimated",
+        }),
+        point({
+          firstAtMs: at(180),
+          lastAtMs: at(240),
+          remainingPercent: 70,
+          resetAtMs: at(210),
+          resetPrecision: "estimated",
+        }),
+      ]),
+      { range: "lifetime", nowMs: at(250) },
+    );
+
+    expect(window.links[0]).toEqual({ kind: "observed" });
+    expect(
+      window.intervals.find((interval) => interval.fromPoint === 0 && interval.toPoint === 1)
+        ?.burnPercentPoints,
+    ).toBe(10);
+  });
+
+  it("accepts a remaining increase as evidence while the boundary barely moves", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({
+          firstAtMs: at(0),
+          lastAtMs: at(60),
+          remainingPercent: 20,
+          resetAtMs: at(120),
+          resetPrecision: "estimated",
+        }),
+        point({
+          firstAtMs: at(180),
+          remainingPercent: 40,
+          resetAtMs: at(230),
+          resetPrecision: "estimated",
+        }),
+      ]),
+      { range: "lifetime", nowMs: at(180) },
+    );
+
+    expect(window.links[0]).toEqual({ kind: "boundary", boundary: "reset" });
+  });
+
+  it("passes the optional stored precision column through", () => {
+    const points = usagePointsFromRuns([
+      {
+        runId: 1,
+        seriesId: "series",
+        firstAtMs: BASE,
+        lastAtMs: BASE + SECOND,
+        sampleCount: 1,
+        remainingPercent: 50,
+        resetAtMs: BASE + 10 * SECOND,
+        reset_precision: "estimated",
+        linked: true,
+      },
+    ]);
+    expect(points[0]?.resetPrecision).toBe("estimated");
+  });
+});
+
+describe("usage intervals: flat runs", () => {
+  it("keeps a flat run as its own zero-burn interval beside the following change", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({ firstAtMs: BASE, lastAtMs: BASE + 600 * SECOND, remainingPercent: 80 }),
+        point({ firstAtMs: BASE + 660 * SECOND, remainingPercent: 70 }),
+      ]),
+      { range: "lifetime", nowMs: BASE + 660 * SECOND },
+    );
+
+    expect(
+      window.intervals.map((interval) => ({
+        startMs: interval.startMs,
+        endMs: interval.endMs,
+        burn: interval.burnPercentPoints,
+        fromPoint: interval.fromPoint,
+        toPoint: interval.toPoint,
+      })),
+    ).toEqual([
+      {
+        startMs: BASE,
+        endMs: BASE + 600 * SECOND,
+        burn: 0,
+        fromPoint: 0,
+        toPoint: 0,
+      },
+      {
+        startMs: BASE + 600 * SECOND,
+        endMs: BASE + 660 * SECOND,
+        burn: 10,
+        fromPoint: 0,
+        toPoint: 1,
+      },
+    ]);
+  });
+
+  it("never emits a zero-duration interval", () => {
+    const single = buildUsageWindowSeries(
+      series([point({ firstAtMs: BASE, remainingPercent: 50 })]),
+      { range: "lifetime", nowMs: BASE },
+    );
+    expect(single.intervals).toEqual([]);
+
+    const touching = buildUsageWindowSeries(
+      series([
+        point({ firstAtMs: BASE, lastAtMs: BASE + 60 * SECOND, remainingPercent: 80 }),
+        point({ firstAtMs: BASE + 60 * SECOND, remainingPercent: 70 }),
+      ]),
+      { range: "lifetime", nowMs: BASE + 60 * SECOND },
+    );
+    expect(touching.intervals).toHaveLength(1);
+    expect(touching.intervals[0]?.fromPoint).toBe(0);
+    expect(touching.intervals[0]?.toPoint).toBe(0);
+    for (const interval of [...single.intervals, ...touching.intervals]) {
+      expect(interval.endMs).toBeGreaterThan(interval.startMs);
+    }
+  });
+
+  it("clips a run that straddles a finite span start", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({ firstAtMs: BASE, lastAtMs: BASE + 60 * SECOND, remainingPercent: 80 }),
+        point({ firstAtMs: BASE + 90 * SECOND, remainingPercent: 70 }),
+      ]),
+      {
+        range: "24h",
+        nowMs: BASE + 120 * SECOND,
+        span: { startMs: BASE + 30 * SECOND, endMs: BASE + 90 * SECOND },
+      },
+    );
+
+    expect(window.intervals[0]).toMatchObject({
+      startMs: BASE + 30 * SECOND,
+      endMs: BASE + 60 * SECOND,
+      burnPercentPoints: 0,
+      fromPoint: 0,
+      toPoint: 0,
+    });
+    expect(window.intervals[1]).toMatchObject({
+      startMs: BASE + 60 * SECOND,
+      endMs: BASE + 90 * SECOND,
+      burnPercentPoints: 10,
+    });
+  });
+});
+
+describe("usage intervals: finite-range coverage", () => {
+  it("counts in-span samples without pro-rating partially overlapping runs", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({
+          firstAtMs: BASE,
+          lastAtMs: BASE + 20 * SECOND,
+          remainingPercent: 80,
+          sampleCount: 5,
+        }),
+        point({
+          firstAtMs: BASE + 10 * SECOND,
+          lastAtMs: BASE + 110 * SECOND,
+          remainingPercent: 70,
+          sampleCount: 9,
+        }),
+        point({
+          firstAtMs: BASE + 20 * SECOND,
+          lastAtMs: BASE + 40 * SECOND,
+          remainingPercent: 65,
+          sampleCount: 7,
+        }),
+        point({
+          firstAtMs: BASE + 40 * SECOND,
+          lastAtMs: BASE + 60 * SECOND,
+          remainingPercent: 60,
+          sampleCount: 3,
+        }),
+        point({
+          firstAtMs: BASE + 70 * SECOND,
+          lastAtMs: BASE + 80 * SECOND,
+          remainingPercent: 55,
+          sampleCount: 2,
+        }),
+        point({
+          firstAtMs: BASE + 85 * SECOND,
+          lastAtMs: BASE + 120 * SECOND,
+          remainingPercent: 50,
+          sampleCount: 4,
+        }),
+      ]),
+      {
+        range: "24h",
+        nowMs: BASE + 120 * SECOND,
+        span: { startMs: BASE + 30 * SECOND, endMs: BASE + 90 * SECOND },
+      },
+    );
+
+    // 0-20 is outside; 10-110 covers the whole span with no endpoint inside;
+    // 20-40 and 85-120 contribute one endpoint each; 40-60 and 70-80 are whole.
+    expect(window.coverage.sampleCount).toBe(1 + 3 + 2 + 1);
+  });
+});
+
+describe("usage intervals: expired current epoch", () => {
+  it("returns an empty axis when the scheduled reset passed without a newer sample", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({ firstAtMs: BASE, lastAtMs: BASE + 6 * SECOND, remainingPercent: 80 }),
+        point({
+          firstAtMs: BASE + 10 * SECOND,
+          lastAtMs: BASE + 20 * SECOND,
+          remainingPercent: 70,
+          resetAtMs: BASE + 30 * SECOND,
+        }),
+      ]),
+      { range: "current", nowMs: BASE + 60 * SECOND },
+    );
+
+    expect(window.axis).toEqual({ startMs: BASE + 30 * SECOND, endMs: BASE + 60 * SECOND });
+    expect(window.points).toEqual([]);
+    expect(window.links).toEqual([]);
+    expect(window.intervals).toEqual([]);
+    expect(window.coverage.observedMs).toBe(0);
+    expect(window.coverage.sampleCount).toBe(0);
+    expect(window.coverage.firstObservedAtMs).toBeUndefined();
+    expect(window.totals.observedBurnPercentPoints).toBe(0);
   });
 });
 

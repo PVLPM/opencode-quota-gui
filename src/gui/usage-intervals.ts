@@ -25,6 +25,12 @@ import type {
 } from "../contracts/usage.js";
 import type { UsageStoredRun } from "../lib/usage-store.js";
 
+/** `exact` = provider-reported reset timestamp; `estimated` = now + offset. */
+export type UsageResetPrecision = "exact" | "estimated";
+
+/** Store rows may already carry the recorder's precision column. */
+type UsageStoredRunWithPrecision = UsageStoredRun & { reset_precision?: UsageResetPrecision };
+
 /** One stored run, in the shape the store query returns. */
 export interface UsageSamplePoint {
   firstAtMs: number;
@@ -32,6 +38,8 @@ export interface UsageSamplePoint {
   remainingPercent: number;
   sampleCount: number;
   resetAtMs?: number;
+  /** Absent means exact, keeping existing series backward compatible. */
+  resetPrecision?: UsageResetPrecision;
   /** Evidence that this run continues the previous run under observation. */
   linked: boolean;
   /** Normalized quantity unit identity, when the row carries one. */
@@ -54,13 +62,18 @@ export interface UsageAxisInput {
 }
 
 /** Store runs to the pure input shape; quantity units become identity keys. */
-export function usagePointsFromRuns(runs: readonly UsageStoredRun[]): UsageSamplePoint[] {
+export function usagePointsFromRuns(
+  runs: readonly UsageStoredRunWithPrecision[],
+): UsageSamplePoint[] {
   return runs.map((run) => ({
     firstAtMs: run.firstAtMs,
     lastAtMs: run.lastAtMs,
     remainingPercent: run.remainingPercent,
     sampleCount: run.sampleCount,
     ...(run.resetAtMs !== undefined ? { resetAtMs: run.resetAtMs } : {}),
+    ...(run.reset_precision === "exact" || run.reset_precision === "estimated"
+      ? { resetPrecision: run.reset_precision }
+      : {}),
     linked: run.linked,
     ...(run.quantity !== undefined ? { unitKey: JSON.stringify(run.quantity.unit) } : {}),
   }));
@@ -94,26 +107,42 @@ function sortPoints(points: readonly UsageSamplePoint[]): UsageSamplePoint[] {
  * Proven scheduled reset, reusing the rule of
  * `src/lib/quota-reset-notifications.ts` (`updateObservation`): the previous
  * observation was taken before its reset boundary, the later observation is
- * at/after that boundary, and the new boundary is later. The marker time is the
- * earlier reset boundary.
+ * at/after that boundary, and the new boundary is later.
+ *
+ * Exact timestamps keep the original rule and fix the marker at the earlier
+ * boundary. Estimated boundaries (`now + offset`, e.g. MiniMax or OpenAI
+ * `reset_after_seconds`) jitter forward by about a poll interval, so time
+ * alone cannot prove a rollover. For those, a reset additionally needs either
+ * an observed remaining increase or a boundary that jumped past the whole gap
+ * between the observations. If either side is estimated, the estimated rule is
+ * used (conservative); the marker has no exact time.
  */
-function provenResetAtMs(
+function provenReset(
   previous: UsageSamplePoint,
   current: UsageSamplePoint,
-): number | undefined {
+): { atMs?: number } | undefined {
   if (previous.resetAtMs === undefined || current.resetAtMs === undefined) return undefined;
   if (previous.lastAtMs > previous.resetAtMs) return undefined;
   if (current.firstAtMs < previous.resetAtMs) return undefined;
   if (!(current.resetAtMs > previous.resetAtMs)) return undefined;
-  return previous.resetAtMs;
+  if (previous.resetPrecision === "estimated" || current.resetPrecision === "estimated") {
+    const gapMs = Math.max(0, current.firstAtMs - previous.lastAtMs);
+    const remainingIncreased = current.remainingPercent > previous.remainingPercent;
+    const boundaryRolledForward = current.resetAtMs > previous.resetAtMs + gapMs;
+    if (!remainingIncreased && !boundaryRolledForward) return undefined;
+    return {};
+  }
+  return { atMs: previous.resetAtMs };
 }
 
 function boundaryBetween(
   previous: UsageSamplePoint,
   current: UsageSamplePoint,
 ): { kind: UsageBoundaryKind; atMs?: number } | undefined {
-  const resetAtMs = provenResetAtMs(previous, current);
-  if (resetAtMs !== undefined) return { kind: "reset", atMs: resetAtMs };
+  const reset = provenReset(previous, current);
+  if (reset !== undefined) {
+    return { kind: "reset", ...(reset.atMs !== undefined ? { atMs: reset.atMs } : {}) };
+  }
   if (previous.unitKey !== current.unitKey) return { kind: "identity-change" };
   if (current.remainingPercent > previous.remainingPercent) {
     return previous.resetAtMs === undefined && current.resetAtMs === undefined
@@ -165,10 +194,20 @@ function includedIndexes(
   if (input.range === "current") {
     const starts = epochStarts(points);
     const latestStart = starts[starts.length - 1] ?? 0;
-    const indexes = points.map((_, index) => index).slice(latestStart);
     const first = points[latestStart] as UsageSamplePoint;
     const last = points[points.length - 1] as UsageSamplePoint;
     const resetAtMs = last.resetAtMs;
+    if (
+      resetAtMs !== undefined &&
+      resetAtMs <= input.nowMs &&
+      !points.slice(latestStart).some((point) => point.firstAtMs >= resetAtMs)
+    ) {
+      // The scheduled reset passed and nothing was observed after it, so the
+      // last epoch is expired. Do not label it "current"; show its empty
+      // successor axis instead.
+      return { indexes: [], axis: { startMs: resetAtMs, endMs: input.nowMs } };
+    }
+    const indexes = points.map((_, index) => index).slice(latestStart);
     return {
       indexes,
       axis: {
@@ -198,44 +237,56 @@ function includedIndexes(
   return { indexes, axis: { startMs: span.startMs, endMs: span.endMs } };
 }
 
+/**
+ * Inspectable intervals in chronological order: each positive-length flat run
+ * followed by the gap up to the next point. A run that straddles the axis start
+ * is clipped to the axis and keeps its flat (zero) burn; an out-of-range
+ * predecessor is never turned into an interval, so no out-of-range burn enters
+ * the range. Zero-duration intervals are never emitted because the activity
+ * query requires `endMs > startMs`.
+ */
 function buildIntervals(
   points: readonly UsagePoint[],
   links: readonly UsageLink[],
+  axis: { startMs: number; endMs: number },
 ): UsageInterval[] {
-  if (points.length === 1) {
-    const only = points[0] as UsagePoint;
-    return [
-      {
-        fromPoint: 0,
-        toPoint: 0,
-        startMs: only.startMs,
-        endMs: only.endMs,
-        previousRemainingPercent: only.remainingPercent,
-        currentRemainingPercent: only.remainingPercent,
+  const intervals: UsageInterval[] = [];
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index] as UsagePoint;
+    const flatStartMs = Math.max(point.startMs, axis.startMs);
+    const flatEndMs = Math.min(point.endMs, axis.endMs);
+    if (flatEndMs > flatStartMs) {
+      intervals.push({
+        fromPoint: index,
+        toPoint: index,
+        startMs: flatStartMs,
+        endMs: flatEndMs,
+        previousRemainingPercent: point.remainingPercent,
+        currentRemainingPercent: point.remainingPercent,
         link: "observed",
         burnPercentPoints: 0,
         attributedBurnPercentPoints: 0,
         unattributedBurnPercentPoints: 0,
         activity: [],
-      },
-    ];
-  }
+      });
+    }
 
-  const intervals: UsageInterval[] = [];
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const previous = points[index] as UsagePoint;
+    if (index >= points.length - 1) continue;
     const current = points[index + 1] as UsagePoint;
     const link = links[index] as UsageLink;
+    const startMs = Math.max(point.endMs, axis.startMs);
+    const endMs = Math.min(current.startMs, axis.endMs);
+    if (endMs <= startMs) continue;
     const burn =
       link.kind === "boundary"
         ? null
-        : Math.max(0, previous.remainingPercent - current.remainingPercent);
+        : Math.max(0, point.remainingPercent - current.remainingPercent);
     intervals.push({
       fromPoint: index,
       toPoint: index + 1,
-      startMs: previous.endMs,
-      endMs: current.startMs,
-      previousRemainingPercent: previous.remainingPercent,
+      startMs,
+      endMs,
+      previousRemainingPercent: point.remainingPercent,
       currentRemainingPercent: current.remainingPercent,
       link: link.kind,
       burnPercentPoints: burn,
@@ -246,6 +297,40 @@ function buildIntervals(
     });
   }
   return intervals;
+}
+
+/**
+ * Finite-range sample count without pro-rating. A run wholly inside the span
+ * contributes its recorded sample count; a partially overlapping run contributes
+ * only its endpoints that fall inside (so a run covering the whole span with no
+ * endpoint inside contributes none). Current/lifetime axes contain their points,
+ * so those keep every run's count.
+ */
+function sampleCountInside(
+  points: readonly UsageSamplePoint[],
+  axis: { startMs: number; endMs: number },
+  finite: boolean,
+): number {
+  let count = 0;
+  for (const point of points) {
+    if (!finite) {
+      count += point.sampleCount;
+      continue;
+    }
+    if (point.firstAtMs >= axis.startMs && point.lastAtMs <= axis.endMs) {
+      count += point.sampleCount;
+      continue;
+    }
+    if (point.firstAtMs >= axis.startMs && point.firstAtMs <= axis.endMs) count += 1;
+    if (
+      point.lastAtMs !== point.firstAtMs &&
+      point.lastAtMs >= axis.startMs &&
+      point.lastAtMs <= axis.endMs
+    ) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 export function buildUsageWindowSeries(
@@ -275,7 +360,7 @@ export function buildUsageWindowSeries(
     );
   }
 
-  const intervals = buildIntervals(points, links);
+  const intervals = buildIntervals(points, links, axis);
   const observedBurn = intervals.reduce(
     (total, interval) => total + (interval.burnPercentPoints ?? 0),
     0,
@@ -304,7 +389,11 @@ export function buildUsageWindowSeries(
       ...(first !== undefined ? { firstObservedAtMs: first.firstAtMs } : {}),
       ...(last !== undefined ? { lastObservedAtMs: last.lastAtMs } : {}),
       observedMs,
-      sampleCount: included.reduce((total, point) => total + point.sampleCount, 0),
+      sampleCount: sampleCountInside(
+        included,
+        axis,
+        axisInput.range === "24h" || axisInput.range === "7d" || axisInput.range === "30d",
+      ),
     },
     points,
     links,
