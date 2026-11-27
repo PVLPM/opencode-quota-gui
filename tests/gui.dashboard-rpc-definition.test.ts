@@ -13,6 +13,7 @@ import {
   validSettingsSnapshot,
   validSettingsWriteResult,
   validUsage,
+  validUsageSnapshot,
 } from "./helpers/dashboard-dto-fixtures.js";
 
 type ValidateResult = { value?: unknown; issues?: ReadonlyArray<{ message: string }> };
@@ -76,6 +77,7 @@ describe("dashboard RPC definition", () => {
     expect(Object.keys(methods)).toEqual([
       "health",
       "quota",
+      "usage",
       "home",
       "groups",
       "project",
@@ -132,6 +134,23 @@ describe("dashboard RPC definition", () => {
       { refresh: true, extra: true },
       "input must be an empty object",
     );
+  });
+
+  it("accepts only a UsageRangeKey for the usage read", async () => {
+    for (const range of ["current", "24h", "7d", "30d", "lifetime"] as const) {
+      await expectAccepted(methods.usage.input, { range });
+    }
+    await expectRejected(
+      methods.usage.input,
+      { range: "90d" },
+      "range must be one of current, 24h, 7d, 30d, lifetime",
+    );
+    await expectRejected(
+      methods.usage.input,
+      { range: "7d", extra: true },
+      "input must contain only range",
+    );
+    await expectRejected(methods.usage.input, {}, "input must contain only range");
   });
 
   it("validates home, project and session resource inputs", async () => {
@@ -445,6 +464,7 @@ describe("dashboard RPC definition", () => {
     const cases = [
       ["health", validHealth()],
       ["quota", validQuotaSnapshot()],
+      ["usage", validUsageSnapshot()],
       ["home", validHomeSnapshot()],
       ["groups", validGroupSnapshot()],
       ["project", validProjectSnapshot()],

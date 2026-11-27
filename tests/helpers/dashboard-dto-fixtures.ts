@@ -13,6 +13,7 @@ import type {
   Usage,
 } from "../../src/contracts/dashboard.js";
 import type { RangeKey } from "../../src/contracts/ranges.js";
+import type { UsageSnapshot } from "../../src/contracts/usage.js";
 
 export function tokenStack(input = 0): TokenStack {
   return { input, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
@@ -52,6 +53,18 @@ export function validUsage(range: RangeKey = "7d"): Usage {
 
 export function validQuotaSnapshot(): QuotaSnapshot {
   return { generatedAtMs: 1, stale: false, timeZone: "UTC", providers: providers() };
+}
+
+/** An empty but structurally valid observation-history payload. */
+export function validUsageSnapshot(): UsageSnapshot {
+  return {
+    generatedAtMs: 1,
+    range: "current",
+    timeZone: "UTC",
+    accounts: [],
+    models: [],
+    imports: [],
+  };
 }
 
 export function validHomeSnapshot(): HomeSnapshot {

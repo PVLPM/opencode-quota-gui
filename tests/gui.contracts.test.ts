@@ -2,8 +2,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { buildSyntheticUsageSnapshot } from "../scripts/fixtures/synthetic-usage.mjs";
 import { DASHBOARD_CONTRACT_VERSION, type SessionNode } from "../src/contracts/dashboard.js";
-import { isHomeSnapshot, isQuotaSnapshot } from "../src/contracts/dto-guards.js";
+import { isHomeSnapshot, isQuotaSnapshot, isUsageSnapshot } from "../src/contracts/dto-guards.js";
 import {
   DASHBOARD_EVENT_TOPICS,
   isCostedTokens,
@@ -20,6 +21,7 @@ import {
   rangeBucketUnit,
   rangeWindow,
 } from "../src/contracts/ranges.js";
+import { isUsageRangeKey, USAGE_RANGE_KEYS } from "../src/contracts/usage.js";
 import { homeSnapshot } from "./fixtures/gui-ui-fixtures.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
@@ -53,6 +55,15 @@ describe("GUI contract range vocabulary", () => {
     expect(isRangeKey("LIFETIME")).toBe(false);
     expect(isRangeKey(null)).toBe(false);
     expect(isRangeKey(24)).toBe(false);
+  });
+
+  it("keeps the Usage range vocabulary separate from Analytics", () => {
+    expect(USAGE_RANGE_KEYS).toEqual(["current", "24h", "7d", "30d", "lifetime"]);
+    expect(USAGE_RANGE_KEYS.every((key) => isUsageRangeKey(key))).toBe(true);
+    expect(isUsageRangeKey("current")).toBe(true);
+    expect(isUsageRangeKey("1d")).toBe(false);
+    expect(isUsageRangeKey("Lifetime")).toBe(false);
+    expect(isUsageRangeKey(undefined)).toBe(false);
   });
 
   it("builds exact rolling windows [now - duration, now)", () => {
@@ -256,6 +267,51 @@ describe("GUI contract guards", () => {
         providers: { ...quota.providers, cards: [{ ...card, stale: false }] },
       }),
     ).toBe(false);
+  });
+
+  it("accepts the synthetic usage history and rejects malformed windows", () => {
+    const snapshot = buildSyntheticUsageSnapshot({ range: "7d", nowMs: NOW });
+    expect(isUsageSnapshot(snapshot)).toBe(true);
+
+    expect(
+      isUsageSnapshot({
+        ...snapshot,
+        accounts: [
+          {
+            ...snapshot.accounts[0],
+            windows: [{ ...snapshot.accounts[0].windows[0], points: [] }],
+          },
+        ],
+      }),
+    ).toBe(false);
+
+    const account = snapshot.accounts[0];
+    const window = account.windows[0];
+    expect(
+      isUsageSnapshot({
+        ...snapshot,
+        accounts: [
+          {
+            ...account,
+            windows: [
+              {
+                ...window,
+                intervals: [
+                  {
+                    ...window.intervals[0],
+                    activity: [{ ...window.intervals[0].activity[0], model: 99 }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe(false);
+
+    expect(isUsageSnapshot({ ...snapshot, range: "90d" })).toBe(false);
+    expect(isUsageSnapshot({ ...snapshot, accounts: "nope" })).toBe(false);
+    expect(isUsageSnapshot({ ...snapshot, models: [{ providerId: "openai" }] })).toBe(false);
   });
 
   it("freezes contract version 2 for the required timeZone payload fields", () => {

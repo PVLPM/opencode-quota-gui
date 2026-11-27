@@ -22,6 +22,7 @@ export function createGuiRpcCaller(ctx: Pick<Context, "client">): DashboardRpcCa
   return {
     health: (input, options) => rpc().health(input, options),
     quota: (input, options) => rpc().quota(input, options),
+    usage: (input, options) => rpc().usage(input, options),
     home: (input, options) => rpc().home(input, options),
     groups: (input, options) => rpc().groups(input, options),
     project: (input, options) => rpc().project(input, options),

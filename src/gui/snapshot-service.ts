@@ -56,6 +56,7 @@ import type {
 import { isRecord } from "../contracts/dto-guards.js";
 import { isTransientProviderFailureCategory } from "../contracts/provider-failure.js";
 import type { RangeKey } from "../contracts/ranges.js";
+import type { UsageRangeKey } from "../contracts/usage.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 
 /** Default quota/provider poll interval (spec §4.2; existing config overrides). */
@@ -89,6 +90,8 @@ export const MAX_TRACKED_PAGES = 16;
 /** Same-key home reads must coalesce, including foreground priority joins. */
 export type SnapshotSource = Pick<DashboardDataSource, "home" | "project" | "session"> & {
   quota?: DashboardDataSource["quota"];
+  /** Local history only; absent means `/api/v1/usage` answers unavailable. */
+  usage?: DashboardDataSource["usage"];
   groups?: DashboardDataSource["groups"];
   refreshAnalytics?: () => Promise<void>;
   /** Optional worker generation notifications; never starts analytics eagerly. */
@@ -127,7 +130,7 @@ export interface SnapshotViewer {
 }
 
 export interface SnapshotService
-  extends Pick<DashboardDataSource, "home" | "quota" | "project" | "session" | "groups"> {
+  extends Pick<DashboardDataSource, "home" | "quota" | "usage" | "project" | "session" | "groups"> {
   /** Invalidations broadcast over SSE (three topics, never raw snapshots). */
   subscribe(listener: (event: DashboardEvent) => void): () => void;
   /**
@@ -193,6 +196,10 @@ function homeKey(range: RangeKey): string {
   return `home\u0000\u0000${range}`;
 }
 
+function usageKey(range: UsageRangeKey): string {
+  return `usage\u0000\u0000${range}`;
+}
+
 function projectKey(projectId: string, range: RangeKey): string {
   return `project\u0000${projectId}\u0000${range}`;
 }
@@ -212,9 +219,12 @@ function kindOf(key: string): string {
 
 function topicFor(key: string): DashboardEventTopic {
   // Home used to include provider cards and emit quota.changed. It is now
-  // analytics-only (usage/projects), so only the independent quota key emits
-  // quota.changed; every analytics key is a session change.
-  return kindOf(key) === "quota" ? "quota.changed" : "sessions.changed";
+  // analytics-only (usage/projects), so the independent quota read and the
+  // observation-history read emit quota.changed; every analytics key is a
+  // session change. Usage history is filled by the quota poll, so it refreshes
+  // with that topic rather than pretending to be analytics.
+  const kind = kindOf(key);
+  return kind === "quota" || kind === "usage" ? "quota.changed" : "sessions.changed";
 }
 
 /**
@@ -836,7 +846,15 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         quotaRetryTimer.unref();
       }
     }
-    if (changed.has("quota.changed")) emit({ topic: "quota.changed", at: now() });
+    if (changed.has("quota.changed")) {
+      // New provider observations change the local history this read serves.
+      // Mark it stale instead of polling it: the next Usage read recomputes from
+      // the stored observations without touching a provider.
+      for (const [key, entry] of cache) {
+        if (kindOf(key) === "usage") entry.stale = true;
+      }
+      emit({ topic: "quota.changed", at: now() });
+    }
   }
 
   async function tickAnalytics(refresh = true, retryIfBusy = false): Promise<void> {
@@ -1049,6 +1067,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         .catch(() => undefined);
       return refresh;
     },
+    usage: (input) =>
+      load(usageKey(input.range), () => {
+        if (!options.source.usage) {
+          return Promise.reject(new Error("Usage source unavailable"));
+        }
+        return options.source.usage(input);
+      }),
     project: (input) =>
       load(projectKey(input.projectId, input.range), () =>
         options.source.project({ projectId: input.projectId, range: input.range }),

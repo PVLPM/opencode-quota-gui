@@ -25,8 +25,10 @@ import {
   isSessionSnapshot,
   isSettingsSnapshot,
   isSettingsWriteResult,
+  isUsageSnapshot,
 } from "./contracts/dto-guards.js";
 import { isRangeKey, type RangeKey } from "./contracts/ranges.js";
+import { isUsageRangeKey, type UsageQuery } from "./contracts/usage.js";
 import {
   isQuotaDialogCommand,
   type QuotaDialogCommandId,
@@ -486,6 +488,18 @@ export const DashboardRpc = {
         (value) => (value === undefined ? {} : (value as { refresh?: boolean })),
       ),
       output: output(isQuotaSnapshot),
+      errors: DASHBOARD_RPC_ERRORS,
+    },
+    usage: {
+      input: schema<UsageQuery>((value) => {
+        if (!isObject(value) || !hasExactKeys(value, ["range"])) {
+          return "input must contain only range";
+        }
+        return isUsageRangeKey(value.range)
+          ? null
+          : "range must be one of current, 24h, 7d, 30d, lifetime";
+      }),
+      output: output(isUsageSnapshot),
       errors: DASHBOARD_RPC_ERRORS,
     },
     home: {

@@ -12,6 +12,7 @@ import type {
   SettingsSnapshot,
   SettingsWriteResult,
 } from "../src/contracts/dashboard.js";
+import type { UsageSnapshot } from "../src/contracts/usage.js";
 import { GuiSettingsError } from "../src/gui/config.js";
 import {
   type DashboardRpcRegister,
@@ -128,6 +129,7 @@ function createFakeRuntime() {
   const snapshots = {
     home: vi.fn(async () => ({ marker: "home" }) as unknown as HomeSnapshot),
     quota: vi.fn(async () => ({ marker: "quota" }) as unknown as QuotaSnapshot),
+    usage: vi.fn(async () => ({ marker: "usage" }) as unknown as UsageSnapshot),
     project: vi.fn(async () => ({ marker: "project" }) as unknown as ProjectSnapshot),
     session: vi.fn(async () => ({ marker: "session" }) as unknown as SessionSnapshot),
     groups: vi.fn(async () => ({ marker: "groups" }) as unknown as AnalyticsGroupSnapshot),
@@ -193,6 +195,7 @@ describe("dashboard RPC handlers", () => {
       contractVersion: 2,
     });
     await expect(call(captured, "quota", {})).resolves.toEqual({ marker: "quota" });
+    await expect(call(captured, "usage", { range: "7d" })).resolves.toEqual({ marker: "usage" });
     await expect(call(captured, "home", { range: "7d" })).resolves.toEqual({ marker: "home" });
     await expect(call(captured, "home", { range: "30d", background: true })).resolves.toEqual({
       marker: "home",
@@ -208,6 +211,7 @@ describe("dashboard RPC handlers", () => {
     });
 
     expect(fake.snapshots.home).toHaveBeenCalledWith({ range: "7d" });
+    expect(fake.snapshots.usage).toHaveBeenCalledWith({ range: "7d" });
     expect(fake.snapshots.home).toHaveBeenCalledWith({ range: "30d", background: true });
     expect(fake.snapshots.groups).toHaveBeenCalledWith({ range: "7d", dimension: "model" });
     await expect(call(captured, "settings", {})).resolves.toEqual({ revision: "rev-1" });
