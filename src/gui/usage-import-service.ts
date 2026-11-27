@@ -13,6 +13,11 @@
  * recorded as hashes (`recordClaudeOwnership`) and imported Claude Code
  * invocations carrying those keys are excluded at query time. Codex rollouts
  * are not written by any OpenCode integration, so Codex needs no exclusion.
+ *
+ * Opt-out stop semantics: the enabled flag is re-read before each harness scan
+ * and before every ownership write, so a disable takes effect on the next
+ * harness. A file chunk already being read may finish and persist its records;
+ * no new harness scan starts after the flag is off.
  */
 import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import {
@@ -91,7 +96,6 @@ export interface UsageImporter {
 }
 
 const DEFAULT_DEBOUNCE_MS = 60_000;
-const OWNERSHIP_SETTINGS_TTL_MS = 30_000;
 const MAX_REMEMBERED_OWNERSHIP_KEYS = 4_096;
 
 function isImportSettings(value: unknown): value is UsageImportSettings {
@@ -124,8 +128,6 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
   let running = false;
   let lastAttemptMs = Number.NEGATIVE_INFINITY;
   let chain: Promise<void> = Promise.resolve();
-  let lastSettings: UsageImportSettings | undefined;
-  let lastSettingsAtMs = Number.NEGATIVE_INFINITY;
   const warned = new Set<UsageImportHarness>();
   const ownershipKeys = new Set<string>();
 
@@ -138,20 +140,7 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
   async function loadSettings(): Promise<UsageImportSettings> {
     const value: unknown = await options.loadSettings();
     if (!isImportSettings(value)) throw new Error("usage-import-settings-invalid");
-    lastSettings = value;
-    lastSettingsAtMs = now();
     return value;
-  }
-
-  async function ownershipSettings(): Promise<UsageImportSettings | undefined> {
-    if (lastSettings !== undefined && now() - lastSettingsAtMs <= OWNERSHIP_SETTINGS_TTL_MS) {
-      return lastSettings;
-    }
-    try {
-      return await loadSettings();
-    } catch {
-      return lastSettings;
-    }
   }
 
   function persist(store: UsageStore, harness: UsageImportHarness, state: UsageImportState): void {
@@ -288,19 +277,18 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
   }
 
   async function runOnce(): Promise<void> {
-    let settings: UsageImportSettings;
-    try {
-      settings = await loadSettings();
-    } catch {
-      return;
-    }
-
-    // The store is already opened by the same live cycle that scheduled this
-    // run, so persisting a disable transition adds no file access.
     const store = await options.store();
     for (const harness of USAGE_IMPORT_HARNESSES) {
+      // Never use a settings snapshot from an earlier harness: a disable that
+      // lands while another harness scans must stop this one from starting.
+      let enabled: boolean;
+      try {
+        enabled = harnessEnabled(await loadSettings(), harness);
+      } catch {
+        continue;
+      }
       const previous = store.getImportState(harness);
-      if (!harnessEnabled(settings, harness)) {
+      if (!enabled) {
         if (previous?.enabled !== false) {
           persist(store, harness, {
             enabled: false,
@@ -400,7 +388,8 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
         try {
           settings = await loadSettings();
         } catch {
-          settings = lastSettings ?? { claudeCode: false, codex: false };
+          // Fail closed: a stale cache could show activity after an opt-out.
+          return emptyImportedActivity(query);
         }
         const active = harnesses.filter((harness) => harnessEnabled(settings, harness));
         if (active.length === 0) {
@@ -414,11 +403,18 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
     recordClaudeOwnership(sessionId, messageId) {
       chain = chain
         .then(async () => {
-          const settings = await ownershipSettings();
-          if (settings?.claudeCode !== true) return;
           const keys = [claudeCodeSessionKey(sessionId), claudeCodeMessageUuidKey(messageId)];
           if (keys.every((key) => ownershipKeys.has(key))) return;
           const store = await options.store();
+          // Re-read after the only await so a disable is never served from a
+          // cache and lands before this write.
+          let settings: UsageImportSettings;
+          try {
+            settings = await loadSettings();
+          } catch {
+            return;
+          }
+          if (!settings.claudeCode) return;
           store.addImportExclusionKeys(keys);
           if (ownershipKeys.size >= MAX_REMEMBERED_OWNERSHIP_KEYS) ownershipKeys.clear();
           for (const key of keys) ownershipKeys.add(key);

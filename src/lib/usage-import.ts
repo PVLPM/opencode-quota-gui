@@ -47,6 +47,40 @@ export function hashUsageImport(kind: string, ...parts: readonly string[]): stri
     .digest("hex");
 }
 
+/**
+ * Effort values recorded by Codex (`ReasoningEffort` in codex-rs) plus the
+ * explicit OpenCode `default` vocabulary. Anything else is treated as unknown
+ * instead of persisting a transcript-controlled string.
+ */
+const USAGE_IMPORT_EFFORTS: ReadonlySet<string> = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+  "persistent",
+  "default",
+]);
+
+export function sanitizeUsageImportEffort(value: unknown): string | undefined {
+  return typeof value === "string" && USAGE_IMPORT_EFFORTS.has(value) ? value : undefined;
+}
+
+/** Conservative model-id shape: no whitespace, backslash, `@`, URL or path. */
+const IMPORTED_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._:/-]{0,63}$/i;
+const IMPORTED_CREDENTIAL_LIKE = /^(?:sk|pk|rk)[-_]|^(?:gh[pousr]_|github_pat_|xox[abposr]-)|^AKIA/;
+
+export function sanitizeUsageImportModelId(value: unknown): string | undefined {
+  if (typeof value !== "string" || !IMPORTED_MODEL_ID_PATTERN.test(value)) return undefined;
+  if (IMPORTED_CREDENTIAL_LIKE.test(value)) return undefined;
+  if (/^[a-z]:[\\/]/i.test(value) || value.includes("..") || value.includes("://"))
+    return undefined;
+  return value;
+}
+
 /** Opaque cursor key for a transcript path; the raw path is never persisted. */
 export function usageImportFileKey(path: string): string {
   const normalized = resolve(path);

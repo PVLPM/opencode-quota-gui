@@ -14,6 +14,7 @@ import {
   listJsonlFiles,
   readIncrementalJsonlFile,
   readJsonlFilesWithBudget,
+  sanitizeUsageImportModelId,
   type UsageImportTokens,
 } from "./usage-import.js";
 
@@ -138,7 +139,7 @@ export function parseClaudeCodeLine(line: string): ClaudeCodeParsedLine | undefi
     dedupeKey: hashUsageImport("claude-invocation", messageId, requestId),
     replayKey: hashUsageImport("claude-replay", nativeSessionKey ?? "", messageKey),
     atMs,
-    model: rawModel ?? "unknown",
+    model: sanitizeUsageImportModelId(rawModel) ?? "unknown",
     usage,
     sidechain: record.isSidechain === true,
     ...(nativeSessionKey === undefined ? {} : { nativeSessionKey }),

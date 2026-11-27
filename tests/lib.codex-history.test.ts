@@ -13,6 +13,9 @@ const THREAD_ID = "019a9f1a-0000-7000-8000-000000000001";
 const ACCOUNT_ID = "account-SECRET-123";
 const SECRET_PROMPT = "SECRET-CODEX-PROMPT";
 const SECRET_CWD = "C:\\SECRET-WORKSPACE\\codex";
+const SECRET_MODEL = "sk-SECRET-model@example.com";
+const SECRET_EFFORT = "SECRET-EFFORT";
+const SECRET_LIMIT = "limit-SECRET-0001";
 const START = "2026-11-01T10:00:00.000Z";
 const SECOND = "2026-11-01T10:00:30.000Z";
 const THIRD = "2026-11-01T10:01:00.000Z";
@@ -124,16 +127,32 @@ function fullRollout(): string {
 describe("parseCodexRolloutLine", () => {
   it("keeps only hashed identities and counter metadata", () => {
     const parsed = parseCodexRolloutLine(sessionMeta().trim());
-    expect(parsed).toMatchObject({
-      kind: "session-meta",
-      cliVersion: "0.164.0",
-      provider: "openai",
-    });
+    expect(parsed).toMatchObject({ kind: "session-meta" });
     expect(parsed?.kind === "session-meta" ? parsed.threadKey : "").toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(parsed)).not.toContain("0.164.0");
+    expect(JSON.stringify(parsed)).not.toContain("openai");
     expect(JSON.stringify(parsed)).not.toContain(THREAD_ID);
     expect(JSON.stringify(parsed)).not.toContain(ACCOUNT_ID);
     expect(JSON.stringify(parsed)).not.toContain(SECRET_CWD);
     expect(JSON.stringify(parsed)).not.toContain(SECRET_PROMPT);
+  });
+
+  it("whitelists effort values and sanitizes model ids", () => {
+    const valid = parseCodexRolloutLine(turnContext("gpt-5.1-codex", "xhigh").trim());
+    expect(valid).toMatchObject({
+      kind: "turn-context",
+      model: "gpt-5.1-codex",
+      effort: "xhigh",
+    });
+
+    const sensitive = parseCodexRolloutLine(turnContext(SECRET_MODEL, SECRET_EFFORT).trim());
+    expect(sensitive).toEqual({ kind: "turn-context" });
+    expect(JSON.stringify(sensitive)).not.toContain(SECRET_MODEL);
+    expect(JSON.stringify(sensitive)).not.toContain(SECRET_EFFORT);
+
+    for (const effort of ["none", "minimal", "low", "medium", "high", "max", "ultra"]) {
+      expect(parseCodexRolloutLine(turnContext("gpt-5", effort).trim())).toMatchObject({ effort });
+    }
   });
 
   it("parses cumulative usage and fixed and relative reset times", () => {
@@ -141,7 +160,7 @@ describe("parseCodexRolloutLine", () => {
       tokenCount(SECOND, counters(), {
         ordinal: 7,
         rateLimits: {
-          limit_id: "codex",
+          limit_id: SECRET_LIMIT,
           primary: { used_percent: 12.5, window_minutes: 300, resets_in_seconds: 600 },
           secondary: { used_percent: 40, resets_at: 1_893_542_400 },
           plan_type: "pro",
@@ -159,9 +178,11 @@ describe("parseCodexRolloutLine", () => {
         primary: { usedPercent: 12.5, windowMinutes: 300, resetsInSeconds: 600 },
         secondary: { usedPercent: 40, resetsAtMs: 1_893_542_400_000 },
         planType: "pro",
-        limitId: "codex",
       },
     });
+    const limitId = parsed?.kind === "token-count" ? parsed.rateLimits?.limitId : undefined;
+    expect(limitId).toMatch(/^[0-9a-f]{16}$/);
+    expect(JSON.stringify(parsed)).not.toContain(SECRET_LIMIT);
   });
 
   it("returns token-count metadata when info is null", () => {
@@ -243,8 +264,6 @@ describe("readCodexHistory", () => {
     const batch = await readCodexHistory({ root });
     expect(batch.available).toBe(true);
     const thread = batch.threads[0];
-    expect(thread?.cliVersion).toBe("0.164.0");
-    expect(thread?.provider).toBe("openai");
     expect(thread?.invocations).toHaveLength(3);
     expect(thread?.invocations[0]?.tokens).toEqual({
       input: 600,
@@ -469,11 +488,24 @@ describe("readCodexHistory", () => {
     expect(batch.cursor).toBe(cursor);
   });
 
-  it("never exposes prompts, cwd, raw ids, or file paths", async () => {
-    const path = await writeRollout(fullRollout());
+  it("never exposes prompts, cwd, raw ids, models, efforts, limits or file paths", async () => {
+    const path = await writeRollout(
+      fullRollout().replace('"effort":"high"', `"effort":"${SECRET_EFFORT}"`) +
+        line("2026-11-01T10:04:00.000Z", "turn_context", {
+          model: SECRET_MODEL,
+          effort: "high",
+        }) +
+        tokenCount("2026-11-01T10:05:00.000Z", counters({ total_tokens: 2600 }), {
+          ordinal: 9,
+          rateLimits: { limit_id: SECRET_LIMIT, primary: { used_percent: 2 } },
+        }),
+    );
     const serialized = JSON.stringify(await readCodexHistory({ root }));
     expect(serialized).not.toContain(SECRET_PROMPT);
     expect(serialized).not.toContain(SECRET_CWD);
+    expect(serialized).not.toContain(SECRET_MODEL);
+    expect(serialized).not.toContain(SECRET_EFFORT);
+    expect(serialized).not.toContain(SECRET_LIMIT);
     expect(serialized).not.toContain(THREAD_ID);
     expect(serialized).not.toContain(ACCOUNT_ID);
     expect(serialized).not.toContain("user-SECRET-456");

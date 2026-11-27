@@ -45,7 +45,7 @@ export const SETTINGS_GROUPS: readonly SettingsGroupDescriptor[] = [
   {
     id: "usage-import",
     title: "Usage history import",
-    note: "Both are off by default. Turning one on starts a one-time import of its existing local history on the next quota refresh.",
+    note: "Both are off by default. The importer extracts timestamps, models, effort and token counts (and Codex quota readings) from local transcript files. It does not store prompts, responses or paths. Turning one on starts a one-time import of its existing local history on the next quota refresh.",
   },
   {
     id: "visibility",
@@ -199,14 +199,14 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     group: "usage-import",
     control: "switch",
     label: "Claude Code",
-    help: "Import token activity from local Claude Code history. Reads only timestamps, models and token counts from Claude Code's local history on this computer. Prompts, responses and file paths are never stored. Sessions OpenCode already recorded through Claude Agent are skipped.",
+    help: "Import token activity from local Claude Code history. Reads only timestamps, models, effort and token counts from Claude Code's local transcript files on this computer. It does not store prompts, responses or paths, and nothing is uploaded. Sessions OpenCode already recorded through Claude Agent are skipped.",
   },
   {
     key: "usageImport.codex",
     group: "usage-import",
     control: "switch",
     label: "Codex",
-    help: "Import token activity and quota readings from local Codex history. Reads only timestamps, models, effort, token counts and quota readings from Codex's local history on this computer. Nothing is uploaded.",
+    help: "Import token activity and quota readings from local Codex history. Reads only timestamps, models, effort, token counts and Codex quota readings from Codex's local transcript files on this computer. It does not store prompts, responses or paths, and nothing is uploaded.",
   },
   {
     key: "enabledProviders",
