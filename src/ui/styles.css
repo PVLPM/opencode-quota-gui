@@ -3616,9 +3616,13 @@
   font-size: var(--font-size-small);
 }
 
+/* The library's critical surface follows the light/dark scheme (near-white in
+   light), while toast text uses the dark-only qg palette; the error tone keeps
+   the dark raised surface and carries its meaning in the border. */
 .qg-toast[data-tone="error"] {
   border-color: var(--qg-danger-border);
-  background: var(--qg-danger-surface);
+  background: var(--qg-surface-raised);
+  color: var(--qg-text);
 }
 
 .qg-toast[data-tone="success"] {
