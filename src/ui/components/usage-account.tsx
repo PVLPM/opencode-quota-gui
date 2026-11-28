@@ -1,17 +1,20 @@
 import type { JSX } from "solid-js";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type { CostedTokens } from "../../contracts/dashboard";
-import type { UsageAccount, UsageBreakdownRow, UsageModelKey } from "../../contracts/usage";
+import type {
+  UsageAccount,
+  UsageBreakdownRow,
+  UsageModelKey,
+  UsageRangeKey,
+} from "../../contracts/usage";
 import {
   formatElapsed,
   formatExactCount,
   formatModelIdentity,
-  formatTimestampMinutes,
   formatTokenCount,
   TOKEN_CATEGORIES,
 } from "../format";
 import {
-  ATTRIBUTION_DISCLOSURE,
   attributedText,
   coveragePercent,
   effortLabel,
@@ -19,6 +22,8 @@ import {
   type QuotaPercentMode,
   UNATTRIBUTED_REASON_LABELS,
 } from "../usage-model";
+import { type UsageRunwayHint, usageRunwayKey } from "../usage-runway";
+import { CardAccountMeta } from "./card-account";
 import { CostValue } from "./cost-estimate";
 import { ProviderLogo } from "./provider-logo";
 import { UsageWindowChart } from "./usage-window-chart";
@@ -92,16 +97,21 @@ function BreakdownModelRow(props: { row: UsageBreakdownRow }): JSX.Element {
 }
 
 /**
- * One Usage card per account: every quota window stacks full-width, and one
- * collapsible model-first breakdown lets the reader switch which window's
- * recorded activity it explains.
+ * One Usage card per account, using the Quota card's compact identity header.
+ * Every quota window stacks full-width; one collapsible model-first breakdown
+ * lets the reader switch which window's recorded activity it explains.
  */
 export function UsageAccountCard(props: {
   account: UsageAccount;
   models: UsageModelKey[];
   mode: QuotaPercentMode;
   timeZone: string;
+  range: UsageRangeKey;
+  nowMs: number;
+  runwayIndex?: ReadonlyMap<string, UsageRunwayHint>;
   index: number;
+  /** The view's single caveat trigger, seated in the first card's header. */
+  info?: JSX.Element;
 }): JSX.Element {
   const [selectedRowId, setSelectedRowId] = createSignal<string>();
   const windows = () => props.account.windows;
@@ -118,27 +128,24 @@ export function UsageAccountCard(props: {
     }
     return [...unique];
   });
+  const runwayFor = (rowId: string): UsageRunwayHint | undefined =>
+    props.runwayIndex?.get(usageRunwayKey(props.account.accountKey, rowId));
 
   return (
     <article class="qg-card qg-usage-account" aria-labelledby={titleId()}>
-      <header class="qg-card__head qg-usage-account__head">
-        <div class="qg-usage-account__identity">
+      <header class="qg-card__head">
+        <div class="qg-card__identity">
           <ProviderLogo providerId={props.account.providerId} class="qg-card__logo" />
-          <div>
-            <h2 class="qg-usage-account__title" id={titleId()}>
-              {props.account.providerLabel}
-              <Show when={props.account.planLabel}>
-                {(plan) => <span class="qg-usage-account__plan"> · {plan()}</span>}
-              </Show>
-            </h2>
-            <span class="qg-usage-account__label">
-              {props.account.accountLabel ?? "All accounts"}
-            </span>
-          </div>
+          <h2 class="qg-card__provider qg-usage-account__title" id={titleId()}>
+            {props.account.providerLabel}
+          </h2>
+          <CardAccountMeta
+            providerLabel={props.account.providerLabel}
+            planLabel={props.account.planLabel}
+            accountLabel={props.account.accountLabel}
+          />
         </div>
-        <span class="qg-usage-badge" data-source={props.account.source}>
-          {props.account.source === "opencode-poll" ? "Local observations" : "Imported history"}
-        </span>
+        <Show when={props.info}>{props.info}</Show>
       </header>
 
       <Show
@@ -158,6 +165,9 @@ export function UsageAccountCard(props: {
                 accountLabel={props.account.accountLabel ?? props.account.providerLabel}
                 mode={props.mode}
                 timeZone={props.timeZone}
+                range={props.range}
+                nowMs={props.nowMs}
+                runway={runwayFor(window.rowId)}
                 headingId={`qg-usage-window-${props.index}-${index()}`}
               />
             )}
@@ -170,7 +180,7 @@ export function UsageAccountCard(props: {
               <summary>Model breakdown</summary>
               <div class="qg-usage-breakdown__content">
                 <div class="qg-usage-breakdown__controls">
-                  <label for={selectId()}>Quota window</label>
+                  <label for={selectId()}>Window</label>
                   <select
                     id={selectId()}
                     class="qg-input qg-usage-breakdown__select"
@@ -188,20 +198,6 @@ export function UsageAccountCard(props: {
                   </span>
                 </div>
 
-                <p class="qg-usage-breakdown__history">
-                  History span{" "}
-                  {window().coverage.firstObservedAtMs === undefined
-                    ? "—"
-                    : `${formatTimestampMinutes(window().coverage.firstObservedAtMs, props.timeZone)} to ${
-                        window().coverage.lastObservedAtMs === undefined
-                          ? "—"
-                          : formatTimestampMinutes(
-                              window().coverage.lastObservedAtMs as number,
-                              props.timeZone,
-                            )
-                      }`}
-                </p>
-
                 <For each={window().breakdown}>{(row) => <BreakdownModelRow row={row} />}</For>
                 <Show when={window().breakdown.length === 0}>
                   <p class="qg-usage-account__empty">
@@ -218,8 +214,6 @@ export function UsageAccountCard(props: {
                     {reasons().length > 0 ? reasons().join(" · ") : "No unassigned observed change"}
                   </span>
                 </div>
-
-                <p class="qg-usage-breakdown__note">{ATTRIBUTION_DISCLOSURE}</p>
               </div>
             </details>
           )}

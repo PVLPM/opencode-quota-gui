@@ -10,6 +10,7 @@ const DOM_TESTS = [
   "tests/gui.runway-dom.test.ts",
   "tests/gui.runway-web-dom.test.ts",
   "tests/gui.usage-dom.test.ts",
+  "tests/gui.usage-tabs.test.ts",
   "tests/gui.native-compatibility-runtime.test.ts",
   "tests/gui.native-cache-composer-pill.test.ts",
   "tests/gui.model-alias-tooltip-dom.test.ts",

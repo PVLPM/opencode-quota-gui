@@ -520,6 +520,15 @@ button.qg-cache-indicator {
   white-space: nowrap;
 }
 
+/* Usage adds a fifth, longer label; keep the control at its content width so
+   "Lifetime" is neither cut nor left behind a scroll. The panel is narrower
+   than the window, so the viewport is never the cap. */
+.qg-panel-root .qg-range.qg-usage-range[data-slot="segmented-control-v2"] {
+  width: fit-content;
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+
 /* An x-scroller clips both axes. Keep the selected and focus rings inside it. */
 .qg-panel-root .qg-range [data-slot="segmented-control-v2-item"][data-selected] {
   box-shadow: inset 0 0 0 0.5px var(--v2-border-border-strong, var(--qg-border-strong));

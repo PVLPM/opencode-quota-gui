@@ -286,7 +286,7 @@ export function usageChartTitle(unit: "hour" | "day"): string {
 
 /** Usage keeps its own range vocabulary; "Current window" is not an Analytics RangeKey. */
 export const USAGE_RANGE_LABELS: Record<string, string> = {
-  current: "Current window",
+  current: "Current",
   "24h": "24h",
   "7d": "7d",
   "30d": "30d",

@@ -7,6 +7,7 @@ import type {
   DashboardDataSource,
   HomeSnapshot,
   ProjectSnapshot,
+  ProviderCard,
   QuotaSnapshot,
   SessionSnapshot,
   SettingsSnapshot,
@@ -443,6 +444,9 @@ export interface UsageRouteProps extends RouteLifecycleProps {
   client: DashboardDataSource;
   route: Extract<Route, { name: "usage" }>;
   preferences: ReturnType<typeof displayPreferencesFromValues>;
+  /** Already-loaded quota cards; their runway is reused, never persisted. */
+  cards?: readonly ProviderCard[];
+  cardsStale?: boolean;
 }
 
 /**
@@ -502,7 +506,14 @@ export function UsageRoute(props: UsageRouteProps): JSX.Element {
         label="Loading usage history"
         skeleton={<UsageLoading />}
         onRetry={() => void query.run()}
-        render={(snapshot) => <UsageView snapshot={snapshot} preferences={props.preferences} />}
+        render={(snapshot) => (
+          <UsageView
+            snapshot={snapshot}
+            preferences={props.preferences}
+            cards={props.cards}
+            cardsStale={props.cardsStale}
+          />
+        )}
       />
     </>
   );

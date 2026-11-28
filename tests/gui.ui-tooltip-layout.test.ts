@@ -111,6 +111,30 @@ describe("chart tooltip collision bounds", () => {
     );
   });
 
+  it("centers a compact tooltip on the active point when one is given", () => {
+    const chart = { left: 100, top: 100, width: 600, height: 132 };
+    const result = placeChartTooltip({
+      chart,
+      bounds: { left: 0, top: 0, width: 800, height: 800 },
+      tooltip: { width: 150, height: 44 },
+      anchor: 0.75,
+      anchorY: 60,
+    });
+    expect(chart.top + result.top).toBe(100 + 60 - 22);
+  });
+
+  it("clamps a point-anchored tooltip inside the visible scroller", () => {
+    const chart = { left: 100, top: 112, width: 600, height: 132 };
+    const result = placeChartTooltip({
+      chart,
+      bounds: { left: 0, top: 120, width: 800, height: 300 },
+      tooltip: { width: 150, height: 44 },
+      anchor: 0.1,
+      anchorY: 4,
+    });
+    expect(chart.top + result.top).toBe(128);
+  });
+
   it("places the tooltip on the opposite half of the plot", () => {
     const chart = { left: 100, top: 100, width: 600, height: 260 };
     const bounds = { left: 0, top: 0, width: 800, height: 800 };

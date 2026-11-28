@@ -1,38 +1,58 @@
 import type { JSX } from "solid-js";
-import { For, Show } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
+import type { ProviderCard } from "../../contracts/dashboard";
 import type { UsageSnapshot } from "../../contracts/usage";
 import type { DisplayPreferences } from "../components/quota-card";
 import { EmptyNotice, Skeleton } from "../components/states";
 import { UsageAccountCard } from "../components/usage-account";
 import { UsageImportedSection } from "../components/usage-imported";
-import { formatTimestampMinutes, pluralize } from "../format";
-import { ATTRIBUTION_DISCLOSURE, harnessLabel } from "../usage-model";
+import { Icon, Tooltip } from "../opencode-ui";
+import { ATTRIBUTION_DISCLOSURE } from "../usage-model";
+import { usageRunwayIndex } from "../usage-runway";
+
+/** The view's one caveat trigger; it seats in the first account header. */
+function UsageInfo(): JSX.Element {
+  return (
+    <Tooltip
+      class="qg-usage-info"
+      value={
+        <span class="qg-usage-caveats__body">
+          <span>Dashed grey is a monitoring gap.</span>
+          <span>Amber dashes are the quota card's projected runway.</span>
+          <span>{ATTRIBUTION_DISCLOSURE}</span>
+        </span>
+      }
+      triggerTabIndex={0}
+      appearance="large"
+      contentClass="qg-usage-caveats"
+    >
+      <span class="sr-only">About usage history</span>
+      <span class="qg-usage-info__icon" aria-hidden="true">
+        <Icon name="info" size="small" />
+      </span>
+    </Tooltip>
+  );
+}
 
 /**
  * Usage is a Quota-area view, not Analytics: it reads the stored observation
  * history the existing poll collected, so opening it performs no provider
- * request. Every account owns one card; every quota window stacks full-width
- * inside that card on all screen widths.
+ * request. One compact card per account; the tab already names the view, so the
+ * page keeps no heading, counts, legend or footer prose. Everything a reader
+ * needs to interpret the plots lives in the one info popover.
  */
 export function UsageView(props: {
   snapshot: UsageSnapshot;
   preferences: DisplayPreferences;
+  /** Already-loaded quota cards supply the same runway data the cards show. */
+  cards?: readonly ProviderCard[];
+  /** A stale quota payload suppresses that runway, exactly as the cards do. */
+  cardsStale?: boolean;
 }): JSX.Element {
-  const enabledImports = () => props.snapshot.imports.filter((entry) => entry.enabled);
+  const runway = createMemo(() => usageRunwayIndex(props.cards, { stale: props.cardsStale }));
 
   return (
     <section class="qg-section qg-usage-view" aria-label="Usage">
-      <header class="qg-section__head">
-        <h2 class="qg-section__title">Usage</h2>
-        <span class="qg-section__meta">
-          {pluralize(props.snapshot.accounts.length, "account")} ·{" "}
-          {pluralize(
-            props.snapshot.accounts.reduce((total, account) => total + account.windows.length, 0),
-            "quota window",
-          )}
-        </span>
-      </header>
-
       <Show when={props.snapshot.historyUnavailable}>
         <output class="qg-usage-view__notice">
           Usage history could not be read. Existing observations are unavailable until the history
@@ -42,29 +62,9 @@ export function UsageView(props: {
 
       <Show when={props.snapshot.activityUnavailable}>
         <output class="qg-usage-view__notice">
-          Recorded activity is not ready for this range. Quota history is still valid, but model
-          attribution is unavailable.
+          Recorded activity is not ready for this range, so model attribution is unavailable.
         </output>
       </Show>
-
-      <section class="qg-legend qg-usage-legend" aria-label="Usage chart legend">
-        <span class="qg-legend__item">
-          <span class="qg-legend__swatch" aria-hidden="true" />
-          <span class="qg-legend__label">Observed</span>
-        </span>
-        <span class="qg-legend__item">
-          <span class="qg-legend__swatch qg-legend__swatch--dashed" aria-hidden="true" />
-          <span class="qg-legend__label">Monitoring gap (unobserved)</span>
-        </span>
-        <span class="qg-legend__item">
-          <span class="qg-usage-legend__marker" aria-hidden="true" />
-          <span class="qg-legend__label">Reset / boundary</span>
-        </span>
-        <span class="qg-legend__item">
-          <span class="qg-usage-legend__unavailable" aria-hidden="true" />
-          <span class="qg-legend__label">No history</span>
-        </span>
-      </section>
 
       <Show
         when={props.snapshot.accounts.length > 0}
@@ -80,7 +80,11 @@ export function UsageView(props: {
                 models={props.snapshot.models}
                 mode={props.preferences.percentMode}
                 timeZone={props.snapshot.timeZone}
+                range={props.snapshot.range}
+                nowMs={props.snapshot.generatedAtMs}
+                runwayIndex={runway()}
                 index={index()}
+                info={index() === 0 ? <UsageInfo /> : undefined}
               />
             )}
           </For>
@@ -94,28 +98,6 @@ export function UsageView(props: {
           )}
         </For>
       </div>
-
-      <Show when={enabledImports().length > 0}>
-        <p class="qg-usage-view__imports">
-          Imports:{" "}
-          {enabledImports()
-            .map((entry) => {
-              const last =
-                entry.lastImportedAtMs === undefined
-                  ? "no import yet"
-                  : `last ${formatTimestampMinutes(entry.lastImportedAtMs, props.snapshot.timeZone)}`;
-              return `${harnessLabel(entry.harness)} (${entry.status}, ${last})`;
-            })
-            .join(" · ")}
-        </p>
-      </Show>
-
-      <p class="qg-usage-view__note">{ATTRIBUTION_DISCLOSURE}</p>
-      <footer class="qg-quota__meta">
-        Local observation history · generated{" "}
-        {formatTimestampMinutes(props.snapshot.generatedAtMs, props.snapshot.timeZone)} · this view
-        never requests provider data
-      </footer>
     </section>
   );
 }

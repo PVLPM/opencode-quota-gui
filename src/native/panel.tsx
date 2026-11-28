@@ -16,10 +16,9 @@ import { isRangeKey, RANGE_KEYS } from "../contracts/ranges";
 import { isUsageRangeKey, USAGE_RANGE_KEYS, type UsageRangeKey } from "../contracts/usage";
 import type { DashboardRpcViewScope } from "../rpc.js";
 import { createAnalyticsPresentationStore } from "../ui/analytics-cache";
-import { AnalyticsTabs } from "../ui/components/analytics-tabs";
+import { AnalyticsTabs, QuotaUsageTabs } from "../ui/components/analytics-tabs";
 import { BuildMismatchStatus } from "../ui/components/build-info";
 import { AnalyticsIcon, QuotaIcon } from "../ui/components/icons";
-import { QuotaUsageTabs } from "../ui/components/quota-usage-tabs";
 import { RangeLabel } from "../ui/components/range-label";
 import { ErrorCard, ReloadRequired } from "../ui/components/states";
 import { TemporalStatusStrip } from "../ui/components/temporal-status";
@@ -436,6 +435,8 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                       enabled={props.visible}
                       onFresh={panel.markFresh}
                       preferences={displayPreferencesFromValues(panel.settings()?.values ?? {})}
+                      cards={homeSnapshot()?.providers.cards}
+                      cardsStale={homeSnapshot()?.stale}
                       onStale={setRouteStale}
                     />
                   )}

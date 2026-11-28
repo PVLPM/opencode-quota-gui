@@ -19,10 +19,9 @@ import type {
 import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
 import { isUsageRangeKey, USAGE_RANGE_KEYS, type UsageRangeKey } from "../contracts/usage";
 import { createAnalyticsPresentationStore } from "./analytics-cache";
-import { AnalyticsTabs } from "./components/analytics-tabs";
+import { AnalyticsTabs, QuotaUsageTabs } from "./components/analytics-tabs";
 import { BuildMismatchStatus } from "./components/build-info";
 import { AnalyticsIcon, QuotaIcon } from "./components/icons";
-import { QuotaUsageTabs } from "./components/quota-usage-tabs";
 import { RangeLabel } from "./components/range-label";
 import { ReloadRequired } from "./components/states";
 import { TemporalStatusStrip } from "./components/temporal-status";
@@ -526,6 +525,8 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                     reloadToken={usageReloadToken()}
                     reconnectEpoch={reconnectEpoch()}
                     preferences={preferences()}
+                    cards={homeSnapshot()?.providers.cards}
+                    cardsStale={homeSnapshot()?.stale}
                     onStale={setRouteStale}
                   />
                 )}
