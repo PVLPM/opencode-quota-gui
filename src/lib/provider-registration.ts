@@ -522,6 +522,31 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
       quota: "local_cli_report",
       notes:
         "Runs the installed Antigravity CLI's own /usage command (agy >= 1.1.11); no install, login or browser step",
+      // Each window is optional: the CLI only reports the buckets this account
+      // has, and the declared row keys are its own bucket ids.
+      optionalVisibilityRows: [
+        {
+          rowKey: "named:gemini-weekly",
+          resultType: "quota",
+          kind: "percent",
+          label: "Weekly",
+          info: "Antigravity CLI Gemini Models weekly window, when the CLI reports it.",
+        },
+        {
+          rowKey: "named:3p-weekly",
+          resultType: "quota",
+          kind: "percent",
+          label: "Weekly",
+          info: "Antigravity CLI Claude and GPT models weekly window, when the CLI reports it.",
+        },
+        {
+          rowKey: "named:3p-5h",
+          resultType: "quota",
+          kind: "percent",
+          label: "5h",
+          info: "Antigravity CLI Claude and GPT models five-hour window, when the CLI reports it.",
+        },
+      ],
     },
   },
   {
