@@ -340,8 +340,10 @@ function unknownResetSeries({ rowId, label, axis, measurement }) {
 /**
  * Builds the complete synthetic snapshot for one requested Usage range.
  * `models` is the shared identity table every `activity.model` indexes into.
+ * `runwayLink` re-keys the first OpenAI 5h window to a live synthetic quota
+ * card row, so the Usage chart can draw that row's runway projection.
  */
-export function buildSyntheticUsageSnapshot({ range, nowMs = Date.now() }) {
+export function buildSyntheticUsageSnapshot({ range, nowMs = Date.now(), runwayLink }) {
   const current5h = axisFor("current", nowMs, 5 * HOUR_MS);
   const currentWeek = axisFor("current", nowMs, 7 * DAY_MS);
   const finite = axisFor(range, nowMs, 5 * HOUR_MS);
@@ -350,7 +352,7 @@ export function buildSyntheticUsageSnapshot({ range, nowMs = Date.now() }) {
 
   const accounts = [
     {
-      accountKey: "synthetic-openai-work",
+      accountKey: runwayLink?.accountKey ?? "synthetic-openai-work",
       providerId: "openai",
       providerLabel: "OpenAI",
       planLabel: "ChatGPT Pro",
@@ -358,7 +360,7 @@ export function buildSyntheticUsageSnapshot({ range, nowMs = Date.now() }) {
       source: "opencode-poll",
       windows: [
         gapSeries({
-          rowId: "five_hour",
+          rowId: runwayLink?.rowId ?? "five_hour",
           label: "5h limit",
           axis: fiveHour,
           breakdown: [

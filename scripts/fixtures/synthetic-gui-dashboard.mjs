@@ -617,6 +617,11 @@ export function buildSyntheticProviderProbes(nowMs) {
             name: "Five hour quota",
             percentRemaining: 55,
             resetTimeIso: new Date(nowMs + 4 * HOUR_MS).toISOString(),
+            // Presentation-only projection, so Usage can draw its dashed runway.
+            runway: {
+              kind: "before_reset",
+              projectedAtIso: new Date(nowMs + 2 * HOUR_MS).toISOString(),
+            },
             accounting: {
               resultType: "quota",
               acquisitionMethod: "remote_api",
