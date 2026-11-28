@@ -15,6 +15,7 @@ const DOM_TESTS = [
   "tests/gui.native-cache-composer-pill.test.ts",
   "tests/gui.model-alias-tooltip-dom.test.ts",
   "tests/gui.model-alias-surfaces.test.ts",
+  "tests/gui.settings-usage-import-dom.test.ts",
 ];
 const SOLID_DEV = fileURLToPath(new URL("./node_modules/solid-js/dist/dev.js", import.meta.url));
 const SOLID_WEB_DEV = fileURLToPath(

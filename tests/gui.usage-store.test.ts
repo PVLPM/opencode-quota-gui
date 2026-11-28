@@ -806,6 +806,159 @@ describe("usage store: duplicate, interruption and identity policy", () => {
   });
 });
 
+describe("usage store: deleting imported history per harness", () => {
+  const SPAN = { startMs: 0, endMs: BASE + 24 * 60 * MINUTE };
+
+  function importedRuns(db: UsageStore) {
+    return db.query(SPAN).runs.filter((run) => run.seriesId.startsWith("codex-import:"));
+  }
+
+  function importedSeries(db: UsageStore) {
+    return db.query(SPAN).series.filter((series) => series.source === "codex-import");
+  }
+
+  /** Row count per harness, read through the store's own read-only connection. */
+  async function invocationCount(harness: "claude-code" | "codex"): Promise<number> {
+    const reader = await openOpenCodeSqliteReadOnly(path);
+    try {
+      return (
+        reader.get<{ total: number }>(
+          "SELECT COUNT(*) AS total FROM usage_import_invocations WHERE harness = ?",
+          [harness],
+        )?.total ?? 0
+      );
+    } finally {
+      reader.close();
+    }
+  }
+
+  function importedClaude(atMs: number, key: string) {
+    return {
+      atMs,
+      model: "claude-sonnet-4-5",
+      tokens: { input: 10, cacheRead: 0, cacheWrite: 0, output: 5, reasoning: 0 },
+      dedupeKey: `claude-${key}`,
+    };
+  }
+
+  function importedCodex(atMs: number, key: string) {
+    return {
+      atMs,
+      model: "gpt-5",
+      effort: "high",
+      tokens: { input: 20, cacheRead: 0, cacheWrite: 0, output: 7, reasoning: 1 },
+      dedupeKey: `codex-${key}`,
+    };
+  }
+
+  /**
+   * One polled series and both imported harnesses, including an imported Codex
+   * rate-limit series. Every deletion assertion below starts from this state.
+   */
+  async function seeded(): Promise<UsageStore> {
+    const db = await store();
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80), sample(ROW_A, BASE + MINUTE, 70)], {
+        collectorRunId: "polled-1",
+        observedCards: [{ cardId: "card-a", providerId: "alpha", atMs: BASE + MINUTE }],
+      }),
+    );
+    db.recordImportedInvocations("claude-code", [importedClaude(BASE + 1_000, "a")]);
+    db.recordImportedInvocations("codex", [importedCodex(BASE + 2_000, "b")]);
+    db.recordCodexRateLimitObservations([
+      {
+        atMs: BASE + 3_000,
+        window: "primary",
+        windowMinutes: 300,
+        usedPercent: 25,
+        accountHint: "acct-a",
+      },
+    ]);
+    db.setImportState("claude-code", { enabled: true, cursor: '{"offset":1}', status: "ok" });
+    db.setImportState("codex", { enabled: true, cursor: '{"offset":2}', status: "ok" });
+    return db;
+  }
+
+  it("deletes one harness and leaves the other harness and polled history intact", async () => {
+    const db = await seeded();
+    expect(await invocationCount("claude-code")).toBe(1);
+    expect(await invocationCount("codex")).toBe(1);
+
+    expect(db.deleteImportedHistory("claude-code")).toEqual({
+      invocations: 1,
+      rateLimitSeries: 0,
+    });
+
+    expect(await invocationCount("claude-code")).toBe(0);
+    expect(await invocationCount("codex")).toBe(1);
+    expect(db.getImportState("claude-code")).toBeUndefined();
+    expect(db.getImportState("codex")).toMatchObject({ enabled: true, status: "ok" });
+    // The polled series and its runs are not import data and must survive.
+    expect(runsOf(db, ROW_A).map((run) => run.remainingPercent)).toEqual([80, 70]);
+    expect(importedSeries(db).map((series) => series.cardId)).toEqual(["codex-import:acct-a"]);
+  });
+
+  it("removes imported Codex rate-limit series, runs and state with the Codex rows", async () => {
+    const db = await seeded();
+    expect(importedRuns(db)).toHaveLength(1);
+
+    expect(db.deleteImportedHistory("codex")).toEqual({ invocations: 1, rateLimitSeries: 1 });
+
+    expect(await invocationCount("codex")).toBe(0);
+    expect(await invocationCount("claude-code")).toBe(1);
+    expect(importedSeries(db)).toEqual([]);
+    expect(importedRuns(db)).toEqual([]);
+    expect(db.getImportState("codex")).toBeUndefined();
+    expect(runsOf(db, ROW_A).map((run) => run.remainingPercent)).toEqual([80, 70]);
+  });
+
+  it("keeps the hash-only exclusion set, which is not harness-scoped", async () => {
+    const db = await seeded();
+    db.addImportExclusionKeys(["session-key-1", "message-key-1"]);
+
+    db.deleteImportedHistory("claude-code");
+    db.deleteImportedHistory("codex");
+
+    const reader = await openOpenCodeSqliteReadOnly(path);
+    try {
+      const keys = reader
+        .all<{ exclusion_key: string }>("SELECT exclusion_key FROM usage_import_exclusions")
+        .map((row) => row.exclusion_key);
+      expect(keys.sort()).toEqual(["message-key-1", "session-key-1"]);
+    } finally {
+      reader.close();
+    }
+  });
+
+  it("resets the cursor so a later re-import re-reads from offset 0", async () => {
+    const db = await seeded();
+    const before = db.getImportState("claude-code");
+    expect(before?.cursor).toBeDefined();
+
+    db.deleteImportedHistory("claude-code");
+    // No state at all: the importer treats a harness without state as a fresh
+    // enable and re-reads from offset 0, which is idempotent through the keys.
+    expect(db.getImportState("claude-code")).toBeUndefined();
+
+    db.recordImportedInvocations("claude-code", [
+      importedClaude(BASE + 1_000, "a"),
+      importedClaude(BASE + 5_000, "c"),
+    ]);
+    db.recordImportedInvocations("claude-code", [
+      importedClaude(BASE + 1_000, "a"),
+      importedClaude(BASE + 5_000, "c"),
+    ]);
+    expect(await invocationCount("claude-code")).toBe(2);
+    expect(importedRuns(db)).toHaveLength(1);
+  });
+
+  it("is a no-op for a harness that never imported anything", async () => {
+    const db = await store();
+    expect(db.deleteImportedHistory("codex")).toEqual({ invocations: 0, rateLimitSeries: 0 });
+    expect(db.getImportState("codex")).toBeUndefined();
+  });
+});
+
 describe("usage store: imported Codex account isolation", () => {
   const FIVE_HOUR = "window:five_hour";
   const SPAN = { startMs: 0, endMs: BASE + 24 * 60 * MINUTE };

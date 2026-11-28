@@ -18,6 +18,7 @@ import {
   markQuotaObservationCycle,
   markQuotaObservationLive,
 } from "../src/gui/quota-observation.js";
+import { createUsageImporter } from "../src/gui/usage-import-service.js";
 import { createUsageRecorder, type UsageRecorder } from "../src/gui/usage-recorder.js";
 import { openOpenCodeSqliteReadOnly } from "../src/lib/opencode-sqlite.js";
 import { hashUsageImport, sanitizeUsageImportModelId } from "../src/lib/usage-import.js";
@@ -832,6 +833,151 @@ describe("usage import", () => {
     } finally {
       reader.close();
     }
+  });
+});
+
+describe("deleting imported history", () => {
+  /** One harness's stored invocation rows, read outside the writer. */
+  async function invocationCount(harness: "claude-code" | "codex"): Promise<number> {
+    const reader = await openOpenCodeSqliteReadOnly(dbPath);
+    try {
+      return (
+        reader.get<{ total: number }>(
+          "SELECT COUNT(*) AS total FROM usage_import_invocations WHERE harness = ?",
+          [harness],
+        )?.total ?? 0
+      );
+    } finally {
+      reader.close();
+    }
+  }
+
+  function makeImporter(options: {
+    store: UsageStore;
+    settings: { claudeCode: boolean; codex: boolean };
+    now: () => number;
+  }) {
+    return createUsageImporter({
+      store: async () => options.store,
+      loadSettings: async () => options.settings,
+      rootFor: (harness) => (harness === "claude-code" ? claudeRoot : codexRoot),
+      now: options.now,
+    });
+  }
+
+  it("removes the rows of an import that was already running", async () => {
+    await writeClaude(claudeLine());
+    const db = await store();
+    const importer = makeImporter({
+      store: db,
+      settings: { claudeCode: true, codex: false },
+      now: () => BASE,
+    });
+
+    // `maybeRun` sets its running flag synchronously, so the scan below is
+    // genuinely in flight when the deletion starts; a deletion that committed
+    // first would leave the scan's rows behind.
+    const running = importer.maybeRun(MINUTE);
+    const deletion = importer.deleteImportedHistory("claude-code");
+    await running;
+    const result = await deletion;
+
+    expect(result).toEqual({ invocations: 1, rateLimitSeries: 0 });
+    expect(await invocationCount("claude-code")).toBe(0);
+    expect(db.getImportState("claude-code")).toBeUndefined();
+  });
+
+  it("re-reads from offset 0 after a deletion without duplicating rows", async () => {
+    await writeClaude(claudeLine());
+    const db = await store();
+    let clock = BASE;
+    const importer = makeImporter({
+      store: db,
+      settings: { claudeCode: true, codex: false },
+      now: () => clock,
+    });
+
+    await importer.maybeRun(MINUTE);
+    expect(await invocationCount("claude-code")).toBe(1);
+    expect(db.getImportState("claude-code")?.cursor).toBeDefined();
+
+    await importer.deleteImportedHistory("claude-code");
+    expect(db.getImportState("claude-code")).toBeUndefined();
+
+    // The next opportunity has no cursor to resume, so it re-reads the whole
+    // history; the dedupe key makes that idempotent rather than a copy.
+    clock += MINUTE * 2;
+    await importer.maybeRun(MINUTE);
+    expect(await invocationCount("claude-code")).toBe(1);
+    expect(db.getImportState("claude-code")).toMatchObject({ enabled: true, status: "ok" });
+  });
+
+  it("leaves the other harness and the import switches untouched", async () => {
+    await writeClaude(claudeLine());
+    await writeCodex();
+    const db = await store();
+    const recorder = makeRecorder({
+      store: db,
+      settings: { claudeCode: true, codex: true },
+      now: () => BASE,
+    });
+    recorder.observe(liveSnapshot());
+    await recorder.flush();
+
+    const importedSpans = async () =>
+      (
+        await recorder.queryImportedActivity({
+          intervals: [{ startMs: 0, endMs: BASE + 60 * MINUTE }],
+          providerIds: ["alpha"],
+        })
+      ).intervals[0]?.entries.map((entry) => entry.providerId) ?? [];
+    expect((await importedSpans()).sort()).toEqual(["anthropic", "openai"]);
+
+    await recorder.deleteImportedHistory("claude-code");
+
+    expect(await invocationCount("claude-code")).toBe(0);
+    expect(await invocationCount("codex")).toBeGreaterThan(0);
+    expect(await importedSpans()).toEqual(["openai"]);
+    // The switches are settings; a deletion never rewrites them, so both
+    // harnesses still report themselves enabled.
+    expect((await recorder.importStatus()).map((entry) => entry.enabled)).toEqual([true, true]);
+    const slice = db.query({ startMs: 0, endMs: BASE + 60 * MINUTE });
+    expect(slice.series.some((series) => series.source === "codex-import")).toBe(true);
+  });
+
+  it("keeps the exclusion set and the polled history it depends on", async () => {
+    const db = await store();
+    const recorder = makeRecorder({
+      store: db,
+      settings: { claudeCode: true, codex: false },
+      now: () => BASE,
+    });
+    recorder.observe(liveSnapshot());
+    db.recordImportedInvocations("claude-code", [
+      {
+        atMs: BASE,
+        model: "claude-sonnet-4-5",
+        tokens: { input: 10, cacheRead: 0, cacheWrite: 0, output: 5, reasoning: 0 },
+        dedupeKey: "claude-owned",
+        nativeSessionKey: "session-key-owned",
+      },
+    ]);
+    recorder.recordClaudeOwnership(CLAUDE_SESSION, CLAUDE_UUID);
+    await recorder.flush();
+
+    await recorder.deleteImportedHistory("claude-code");
+
+    const reader = await openOpenCodeSqliteReadOnly(dbPath);
+    try {
+      expect(
+        reader.get<{ total: number }>("SELECT COUNT(*) AS total FROM usage_import_exclusions")
+          ?.total,
+      ).toBe(2);
+    } finally {
+      reader.close();
+    }
+    // The polled series the recorder captured is not import data.
+    expect(db.query({ startMs: 0, endMs: BASE + 60 * MINUTE }).runs.length).toBeGreaterThan(0);
   });
 });
 

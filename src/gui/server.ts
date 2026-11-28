@@ -23,10 +23,11 @@ import {
   type AnalyticsGroupQuery,
   DASHBOARD_CONTRACT_VERSION,
   type GuiSettingsStore,
+  type ImportedHistoryDeleter,
   type JsonValue,
 } from "../contracts/dashboard.js";
 import { DEFAULT_RANGE_KEY, isRangeKey, type RangeKey } from "../contracts/ranges.js";
-import { isUsageRangeKey, type UsageRangeKey } from "../contracts/usage.js";
+import { isUsageImportHarness, isUsageRangeKey, type UsageRangeKey } from "../contracts/usage.js";
 import { GuiSettingsError } from "./config.js";
 import {
   DASHBOARD_ERROR_MESSAGES,
@@ -58,6 +59,12 @@ export interface DashboardServerOptions {
    */
   snapshots: SnapshotService;
   settings: GuiSettingsStore;
+  /**
+   * Optional usage recorder seam. Absent on hosts without usage history: the
+   * delete route then reports a controlled `config-target-error` instead of
+   * pretending the private store was emptied.
+   */
+  usage?: ImportedHistoryDeleter;
   /** Static root; defaults to `<package>/dist/ui` derived from this module. */
   assetRoot?: string;
   /** SSE heartbeat override (test seam; default 20 s). */
@@ -735,6 +742,33 @@ export function createDashboardServer(
       }
       await open();
       sendJson(res, 200, { opened: true });
+      return;
+    }
+
+    if (rest.length === 2 && rest[0] === "imported-history" && rest[1] === "delete") {
+      if (!requireMethods(req, res, ["POST"])) return;
+      const parsed = await readWriteJson(req, res);
+      if (!parsed.ok) return;
+      if (!isRecord(parsed.value) || !hasExactKeys(parsed.value, ["harness"])) {
+        sendError(res, "bad-request");
+        return;
+      }
+      const harness = parsed.value.harness;
+      if (!isUsageImportHarness(harness)) {
+        sendError(res, "bad-request");
+        return;
+      }
+      const usage = options.usage;
+      if (!usage) {
+        throw new GuiSettingsError(
+          "config-target-error",
+          "Deleting imported history is not available",
+        );
+      }
+      // Counts only: the response never names a row, hash or path.
+      const result = await usage.deleteImportedHistory(harness);
+      snapshots.notifyUsageChanged();
+      sendJson(res, 200, result);
       return;
     }
 

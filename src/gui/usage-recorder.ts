@@ -6,18 +6,25 @@
  * replays and retained/error/cooldown cards produce evidence, never samples.
  * Writes are serialized on one chain and never block or reject the quota read.
  */
-import type { ProviderCard, QuotaCardRow, QuotaSnapshot } from "../contracts/dashboard.js";
-import type { UsageMeasurementKind } from "../contracts/usage.js";
+import type {
+  DeleteImportedHistoryResult,
+  ProviderCard,
+  QuotaCardRow,
+  QuotaSnapshot,
+} from "../contracts/dashboard.js";
+import {
+  USAGE_IMPORT_HARNESSES,
+  type UsageImportHarness,
+  type UsageMeasurementKind,
+} from "../contracts/usage.js";
 import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import { sanitizeSingleLineDisplayText } from "../lib/display-sanitize.js";
 import { getGuiPrivateStatePath } from "../lib/private-state-paths.js";
 import {
   openUsageStore,
-  USAGE_IMPORT_HARNESSES,
   type UsageCycleInterruption,
   type UsageCycleObservation,
   type UsageCycleSample,
-  type UsageImportHarness,
   type UsageSeriesMetadata,
   type UsageStore,
 } from "../lib/usage-store.js";
@@ -71,6 +78,11 @@ export interface UsageRecorder {
   importStatus(): Promise<UsageImportStatus[]>;
   /** Priced imported Claude Code / Codex activity for the enabled harnesses. */
   queryImportedActivity(query: UsageActivityQuery): Promise<UsageActivityResult>;
+  /**
+   * Delete one harness's imported history without touching its switch or the
+   * other harness. Serialized with the importer's single-flight.
+   */
+  deleteImportedHistory(harness: UsageImportHarness): Promise<DeleteImportedHistoryResult>;
 }
 
 function label(value: string | undefined): string | undefined {
@@ -424,6 +436,14 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
         return Promise.resolve(emptyImportedActivity(query));
       }
       return importer.queryActivity(query, USAGE_IMPORT_HARNESSES);
+    },
+
+    deleteImportedHistory(harness) {
+      // The importer owns the single-flight that keeps a running scan from
+      // re-inserting rows after the delete; without one this host never
+      // imports, so the store deletion is already exclusive here.
+      if (importer !== undefined) return importer.deleteImportedHistory(harness);
+      return store().then((target) => target.deleteImportedHistory(harness));
     },
 
     async flush() {

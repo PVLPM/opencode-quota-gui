@@ -25,6 +25,7 @@ import type {
   Bucket,
   ClaudeAgentAliasPricingProvenance,
   DashboardHealth,
+  DeleteImportedHistoryResult,
   HomeSnapshot,
   ImportPreview,
   JsonValue,
@@ -65,6 +66,7 @@ import type {
 } from "./temporal.js";
 import {
   isUsageRangeKey,
+  USAGE_IMPORT_HARNESSES,
   type UsageActivity,
   type UsageBoundaryKind,
   type UsageBreakdownRow,
@@ -591,7 +593,6 @@ const USAGE_UNATTRIBUTED_REASONS = [
   "unobserved-interval",
   "unidentified-activity",
 ] as const satisfies readonly UsageUnattributedReason[];
-const USAGE_IMPORT_HARNESSES = ["claude-code", "codex"] as const;
 const USAGE_IMPORT_STATUSES = ["disabled", "ok", "unavailable", "error"] as const;
 
 function isPercentValue(value: unknown): value is number {
@@ -1122,5 +1123,17 @@ export function isImportPreview(value: unknown): value is ImportPreview {
     ) &&
     isKeyMessages(value.issues) &&
     isText(value.expectedRevision)
+  );
+}
+
+/** Counts only: a deleted import is never described by an id, path or row. */
+export function isDeleteImportedHistoryResult(
+  value: unknown,
+): value is DeleteImportedHistoryResult {
+  return (
+    isRecord(value) &&
+    isIntegerBetween(value.invocations, 0, Number.MAX_SAFE_INTEGER) &&
+    isIntegerBetween(value.rateLimitSeries, 0, Number.MAX_SAFE_INTEGER) &&
+    Object.keys(value).length === 2
   );
 }

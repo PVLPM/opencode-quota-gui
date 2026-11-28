@@ -18,7 +18,15 @@
  * and before every ownership write, so a disable takes effect on the next
  * harness. A file chunk already being read may finish and persist its records;
  * no new harness scan starts after the flag is off.
+ *
+ * Deletion semantics: turning a switch off keeps what was already imported.
+ * `deleteImportedHistory` is the separate, explicit removal; it shares this
+ * module's single-flight so a scan already in progress cannot re-insert rows
+ * after the commit, and it drops the cursor so a later run re-reads from
+ * offset 0 (idempotent through the dedupe keys).
  */
+import type { DeleteImportedHistoryResult } from "../contracts/dashboard.js";
+import { USAGE_IMPORT_HARNESSES, type UsageImportHarness } from "../contracts/usage.js";
 import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import {
   type ClaudeCodeImportCursor,
@@ -33,13 +41,11 @@ import {
   resolveCodexHome,
 } from "../lib/codex-history.js";
 import { USAGE_IMPORT_READ_BUDGET_BYTES, type UsageImportTokens } from "../lib/usage-import.js";
-import {
-  USAGE_IMPORT_HARNESSES,
-  type UsageImportedCodexRateLimit,
-  type UsageImportHarness,
-  type UsageImportState,
-  type UsageImportStatusKind,
-  type UsageStore,
+import type {
+  UsageImportedCodexRateLimit,
+  UsageImportState,
+  UsageImportStatusKind,
+  UsageStore,
 } from "../lib/usage-store.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 
@@ -91,6 +97,14 @@ export interface UsageImporter {
   ): Promise<UsageActivityResult>;
   /** Hash and persist one host-native Claude Agent identity, when import is on. */
   recordClaudeOwnership(sessionId: string, messageId: string): void;
+  /**
+   * Delete one harness's imported history. The deletion shares the import
+   * single-flight: a run already scanning completes first (and its rows are
+   * then removed), and no run starts until the deletion has committed, so an
+   * in-flight import can never re-insert rows behind it. The cursor row goes
+   * with the data, so the harness re-reads from offset 0 when it runs again.
+   */
+  deleteImportedHistory(harness: UsageImportHarness): Promise<DeleteImportedHistoryResult>;
   /** Resolves after queued ownership writes and imports settle. */
   flush(): Promise<void>;
 }
@@ -128,6 +142,15 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
   let running = false;
   let lastAttemptMs = Number.NEGATIVE_INFINITY;
   let chain: Promise<void> = Promise.resolve();
+  /** The run currently scanning, so a deletion can wait for its rows to land. */
+  let currentRun: Promise<void> | undefined;
+  /**
+   * Counted, not boolean: two overlapping deletions both keep new runs out, and
+   * the last one to finish releases the gate. Every entry point reads and
+   * writes it synchronously, before its first `await`, which is what makes the
+   * gate immune to an interleaving run.
+   */
+  let deleting = 0;
   const warned = new Set<UsageImportHarness>();
   const ownershipKeys = new Set<string>();
 
@@ -367,19 +390,41 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
 
   return {
     async maybeRun(intervalMs) {
-      if (running) return;
+      // `running` and `deleting` are read before either is set, so a deletion
+      // that starts now keeps this opportunity out and vice versa.
+      if (running || deleting > 0) return;
       const at = now();
       const debounce =
         Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : DEFAULT_DEBOUNCE_MS;
       if (at - lastAttemptMs < debounce) return;
       lastAttemptMs = at;
       running = true;
+      const run = (async () => {
+        try {
+          await runOnce();
+        } catch {
+          logger.warn("usage import failed", "import-failed");
+        } finally {
+          running = false;
+          currentRun = undefined;
+        }
+      })();
+      currentRun = run;
+      await run;
+    },
+
+    async deleteImportedHistory(harness) {
+      // Entered synchronously, before any await: nothing that checks this gate
+      // can start a run between here and the commit.
+      deleting += 1;
       try {
-        await runOnce();
-      } catch {
-        logger.warn("usage import failed", "import-failed");
+        // A run that already started wrote its rows first; they are part of
+        // what this deletion removes. A run cannot start while `deleting > 0`.
+        await currentRun;
+        const store = await options.store();
+        return store.deleteImportedHistory(harness);
       } finally {
-        running = false;
+        deleting -= 1;
       }
     },
 

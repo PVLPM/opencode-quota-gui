@@ -83,6 +83,7 @@ function createFakeCaller() {
     importPreview: vi.fn(async () => ({ marker: "importPreview" })),
     importApply: vi.fn(async () => ({ marker: "importApply" })),
     openSettingsFile: vi.fn(async () => ({ opened: true as const })),
+    deleteImportedHistory: vi.fn(async () => ({ invocations: 2, rateLimitSeries: 1 })),
     watch: vi.fn(
       (input: { scope: string; attemptNonce?: string }, options?: { signal?: AbortSignal }) =>
         new Promise<{ active: boolean }>((resolve, reject) => {
@@ -707,6 +708,11 @@ describe("native dashboard RPC client", () => {
     });
     await expect(client.openSettingsFile()).resolves.toBeUndefined();
     expect(fake.raw.openSettingsFile).toHaveBeenCalledOnce();
+    await expect(client.deleteImportedHistory("codex")).resolves.toEqual({
+      invocations: 2,
+      rateLimitSeries: 1,
+    });
+    expect(fake.raw.deleteImportedHistory).toHaveBeenCalledWith({ harness: "codex" });
     client.dispose();
   });
 

@@ -88,6 +88,7 @@ describe("dashboard RPC definition", () => {
       "importPreview",
       "importApply",
       "openSettingsFile",
+      "deleteImportedHistory",
       "watch",
     ]);
     expect(Object.keys(DashboardRpc.events)).toEqual(["invalidated", "quotaNotification"]);
@@ -299,6 +300,26 @@ describe("dashboard RPC definition", () => {
       { expectedRevision: "r", extra: true },
       "input must contain only expectedRevision",
     );
+
+    // Deletion names exactly one known harness: no path, id or free-form field
+    // can reach the private store through this input.
+    await expectAccepted(methods.deleteImportedHistory.input, { harness: "claude-code" });
+    await expectAccepted(methods.deleteImportedHistory.input, { harness: "codex" });
+    await expectRejected(
+      methods.deleteImportedHistory.input,
+      { harness: "openai" },
+      "harness must be claude-code or codex",
+    );
+    await expectRejected(
+      methods.deleteImportedHistory.input,
+      { harness: "codex", rowId: "codex-import:acct-a#window:week" },
+      "input must contain only harness",
+    );
+    await expectRejected(
+      methods.deleteImportedHistory.input,
+      {},
+      "input must contain only harness",
+    );
   });
 
   it("validates the held viewer scope", async () => {
@@ -494,6 +515,26 @@ describe("dashboard RPC definition", () => {
       methods.openSettingsFile.output,
       { opened: false },
       "output must report opened",
+    );
+
+    // Counts only: a result that tries to describe rows is not this contract.
+    await expectAccepted(methods.deleteImportedHistory.output, {
+      invocations: 3,
+      rateLimitSeries: 1,
+    });
+    await expectAccepted(methods.deleteImportedHistory.output, {
+      invocations: 0,
+      rateLimitSeries: 0,
+    });
+    await expectRejected(
+      methods.deleteImportedHistory.output,
+      { invocations: 3, rateLimitSeries: 1, deletedIds: ["x"] },
+      "output does not match the dashboard contract",
+    );
+    await expectRejected(
+      methods.deleteImportedHistory.output,
+      { invocations: -1, rateLimitSeries: 0 },
+      "output does not match the dashboard contract",
     );
   });
 

@@ -29,6 +29,21 @@ export interface UsageQuery {
 export type UsageSource = "opencode-poll" | "codex-import";
 
 /**
+ * The opt-in external harnesses whose local history can be imported (D10).
+ *
+ * One definition serves the persisted store, the RPC/HTTP contract and the
+ * dashboard parsers, so a new harness cannot drift between them.
+ */
+export const USAGE_IMPORT_HARNESSES = ["claude-code", "codex"] as const;
+export type UsageImportHarness = (typeof USAGE_IMPORT_HARNESSES)[number];
+
+const USAGE_IMPORT_HARNESS_NAMES: ReadonlySet<unknown> = new Set<unknown>(USAGE_IMPORT_HARNESSES);
+
+export function isUsageImportHarness(value: unknown): value is UsageImportHarness {
+  return USAGE_IMPORT_HARNESS_NAMES.has(value);
+}
+
+/**
  * How a measurement was obtained. `provider-observed` is a provider quota
  * reading; `locally-estimated` is computed by this plugin (for example
  * Cursor's local cost estimate) and is never a provider measurement.
@@ -198,7 +213,7 @@ export interface UsageAccount {
  * `UsageWindowSeries.breakdown`.
  */
 export interface UsageImportedActivity {
-  harness: "claude-code" | "codex";
+  harness: UsageImportHarness;
   /** Requested span this activity was read over. */
   span: { startMs: number; endMs: number };
   /** Model-first totals. `estimatedBurnPercentPoints` is never set here. */
@@ -219,7 +234,7 @@ export interface UsageSnapshot {
   models: UsageModelKey[];
   /** Imported harnesses enabled and their last import outcome. */
   imports: {
-    harness: "claude-code" | "codex";
+    harness: UsageImportHarness;
     enabled: boolean;
     lastImportedAtMs?: number;
     status: "disabled" | "ok" | "unavailable" | "error";

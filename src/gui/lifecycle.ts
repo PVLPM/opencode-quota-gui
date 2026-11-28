@@ -748,6 +748,7 @@ async function startHost(
       port: context.port,
       snapshots,
       settings,
+      ...(runtime.usage !== undefined ? { usage: runtime.usage } : {}),
       logger: context.logger,
     });
   } catch (error) {

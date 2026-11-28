@@ -1,4 +1,4 @@
-import type { GuiSettingsStore } from "../../src/contracts/dashboard.js";
+import type { GuiSettingsStore, ImportedHistoryDeleter } from "../../src/contracts/dashboard.js";
 import type { GuiLogger } from "../../src/gui/log.js";
 import { createDashboardServer, type DashboardServerHandle } from "../../src/gui/server.js";
 import { createSnapshotService, type SnapshotSource } from "../../src/gui/snapshot-service.js";
@@ -7,6 +7,7 @@ export interface TestDashboardServerOptions {
   port: number;
   source: SnapshotSource;
   settings: GuiSettingsStore;
+  usage?: ImportedHistoryDeleter;
   assetRoot?: string;
   heartbeatMs?: number;
   quotaIntervalMs?: number | (() => number);

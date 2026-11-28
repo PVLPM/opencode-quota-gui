@@ -33,6 +33,7 @@ export function createGuiRpcCaller(ctx: Pick<Context, "client">): DashboardRpcCa
     importPreview: (input, options) => rpc().importPreview(input, options),
     importApply: (input, options) => rpc().importApply(input, options),
     openSettingsFile: (input, options) => rpc().openSettingsFile(input, options),
+    deleteImportedHistory: (input, options) => rpc().deleteImportedHistory(input, options),
     watch: (input, options) => rpc().watch(input, options),
     events: {
       /**
