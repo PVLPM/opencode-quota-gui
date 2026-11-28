@@ -24,6 +24,7 @@ import {
 } from "../src/gui/usage-service.js";
 import {
   openUsageStore,
+  type UsageCycleInterruption,
   type UsageCycleSample,
   type UsageSeriesMetadata,
   type UsageStore,
@@ -117,6 +118,7 @@ function record(
   db: UsageStore,
   atMs: number,
   items: readonly { series: UsageSeriesMetadata; remaining: number; resetAtMs?: number }[],
+  interruptions: UsageCycleInterruption[] = [],
 ): void {
   const cards = new Map(
     items.map((item) => [
@@ -137,7 +139,7 @@ function record(
     observedCards: [...cards.values()],
     providerIds: [...new Set(items.map((item) => item.series.providerId))],
     samples,
-    interruptions: [],
+    interruptions,
     nowMs: atMs,
   });
   runSequence += 1;
@@ -656,6 +658,86 @@ describe("usage snapshot: attribution", () => {
     expect(interval?.attributedBurnPercentPoints).toBe(0);
     expect(interval?.unattributedReason).toBe("unidentified-activity");
     expect(interval?.activity).toHaveLength(1);
+  });
+
+  it("keeps burn ambiguous when a second account is configured but was never measured", async () => {
+    const db = await store();
+    const measured = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: measured, remaining: 80 }]);
+    record(db, at(1), [{ series: measured, remaining: 70 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+      // Two accounts exist for one provider; only one produced quota history.
+      latestQuotaCards: () => [card("anthropic:aaaaaa", []), card("anthropic:bbbbbb", [])],
+    }).usage({ range: "lifetime" });
+
+    const interval = snapshot.accounts[0]?.windows[0]?.intervals[0];
+    expect(interval?.burnPercentPoints).toBe(10);
+    expect(interval?.attributedBurnPercentPoints).toBe(0);
+    expect(interval?.unattributedBurnPercentPoints).toBe(10);
+    expect(interval?.unattributedReason).toBe("ambiguous-account");
+  });
+
+  it("keeps burn ambiguous when a rival account's quota request failed in the interval", async () => {
+    const db = await store();
+    const measured = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: measured, remaining: 80 }]);
+    record(
+      db,
+      at(1),
+      [{ series: measured, remaining: 70 }],
+      [{ cardId: "anthropic:bbbbbb", providerId: "anthropic", kind: "error", atMs: at(0.5) }],
+    );
+
+    // No successful rival measurement exists, but the failed attempt proves the
+    // rival account was live during the interval.
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+    }).usage({ range: "lifetime" });
+
+    const interval = snapshot.accounts[0]?.windows[0]?.intervals[0];
+    expect(interval?.burnPercentPoints).toBe(10);
+    expect(interval?.attributedBurnPercentPoints).toBe(0);
+    expect(interval?.unattributedReason).toBe("ambiguous-account");
+  });
+
+  it("still attributes burn for a provider with a single configured account", async () => {
+    const db = await store();
+    const sole = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: sole, remaining: 80 }]);
+    record(db, at(1), [{ series: sole, remaining: 70 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+      latestQuotaCards: () => [card("anthropic:aaaaaa", [])],
+    }).usage({ range: "lifetime" });
+
+    const interval = snapshot.accounts[0]?.windows[0]?.intervals[0];
+    expect(interval?.attributedBurnPercentPoints).toBe(10);
+    expect(interval?.unattributedBurnPercentPoints).toBe(0);
+    expect(interval?.unattributedReason).toBeUndefined();
+  });
+
+  it("attributes an interval whose only rival was removed and never overlapped it", async () => {
+    const db = await store();
+    const kept = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    const removed = series("anthropic:bbbbbb", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: kept, remaining: 80 }]);
+    record(db, at(1), [{ series: kept, remaining: 70 }]);
+    // The removed account was measured later; only its history remains.
+    record(db, at(10), [{ series: removed, remaining: 60 }]);
+    record(db, at(11), [{ series: removed, remaining: 55 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+      latestQuotaCards: () => [card("anthropic:aaaaaa", [])],
+    }).usage({ range: "lifetime" });
+
+    const keptAccount = snapshot.accounts.find((account) => account.accountKey === kept.cardId);
+    const interval = keptAccount?.windows[0]?.intervals[0];
+    expect(interval?.attributedBurnPercentPoints).toBe(10);
+    expect(interval?.unattributedReason).toBeUndefined();
   });
 });
 
