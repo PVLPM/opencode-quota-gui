@@ -1005,6 +1005,9 @@ async function removeOrphanedAnalyticsTemps(snapshotPath: string): Promise<void>
       analyticsLogger.info("analytics orphaned snapshot temps removed", String(removed));
     }
   } catch (error) {
-    analyticsLogger.warn("analytics orphaned snapshot temp cleanup failed", errorCodeOf(error));
+    const code = errorCodeOf(error);
+    // No state directory yet (first run): nothing to reclaim, nothing to report.
+    if (code === "ENOENT") return;
+    analyticsLogger.warn("analytics orphaned snapshot temp cleanup failed", code);
   }
 }
