@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -478,6 +478,49 @@ describe("analytics SQLite store", () => {
     expect(after?.coverage).toBeUndefined();
     expect(after?.frontierAtMs).toBe(0);
     store.close();
+  });
+
+  it("never opens a database file that is a link to another file", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const victim = join(root, "usage-history.sqlite");
+    writeFileSync(victim, "not an analytics database");
+    linkSync(victim, join(root, "analytics.sqlite"));
+    const builder = stateBuilder();
+    seed(builder);
+    const store = createAnalyticsStore({ snapshotPath });
+    expect(await store.saveSnapshot(builder.state, NOW, builder.delta)).toBe(false);
+    expect(await store.savePresentation(builder.state, NOW)).toBe(false);
+    store.close();
+    // Neither written through nor removed by corruption recovery.
+    expect(readFileSync(victim, "utf8")).toBe("not an analytics database");
+    expect(existsSync(join(root, "analytics.sqlite"))).toBe(true);
+  });
+
+  it("imports only the sidecar contract's fields from a legacy sidecar", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const builder = stateBuilder();
+    builder.state.presentation = {
+      home: { "7d": { projects: [], usage: { timeZone: "UTC" } } as unknown as HomeSnapshot },
+      project: [],
+    };
+    const sidecar = `${snapshotPath}.presentation.json`;
+    expect(await saveAnalyticsPresentation(sidecar, builder.state, NOW)).toBe(true);
+    const legacy = JSON.parse(readFileSync(sidecar, "utf8")) as Record<string, unknown>;
+    legacy.unexpected = "legacy-only-value";
+    (legacy.presentation as Record<string, unknown>).unexpected = "legacy-only-value";
+    writeFileSync(sidecar, JSON.stringify(legacy));
+
+    const store = createAnalyticsStore({ snapshotPath });
+    expect((await store.loadPresentation())?.home["7d"]).toBeDefined();
+    store.close();
+    const conn = await openOpenCodeSqliteWritable(join(root, "analytics.sqlite"));
+    const stored = conn
+      .all<{ value: string }>("SELECT value FROM analytics_meta")
+      .concat(conn.all<{ value: string }>("SELECT payload AS value FROM analytics_presentation"));
+    conn.close();
+    expect(stored.some((row) => row.value.includes("legacy-only-value"))).toBe(false);
   });
 
   it("yields during a large load and serializes writes queued behind it", async () => {

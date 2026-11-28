@@ -28,7 +28,7 @@
  * from OpenCode history, never repaired by guessing.
  */
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { readFile, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
@@ -445,9 +445,30 @@ function initializeSchema(conn: WritableSqliteConn): string {
   }
 }
 
+function databaseFiles(path: string): string[] {
+  return [path, `${path}-wal`, `${path}-shm`, `${path}-journal`];
+}
+
+/**
+ * SQLite opens through links, unlike the JSON writer's temp-file rename. A
+ * symlinked or hard-linked database or journal could redirect every write
+ * (and the schema rebuild) into another file, so such a store is never opened.
+ */
+function databaseFilesAreLinked(path: string): boolean {
+  for (const candidate of databaseFiles(path)) {
+    try {
+      const info = lstatSync(candidate);
+      if (info.isSymbolicLink() || (info.isFile() && info.nlink > 1)) return true;
+    } catch {
+      // Absent: SQLite creates a plain file.
+    }
+  }
+  return false;
+}
+
 async function removeDatabaseFiles(path: string): Promise<boolean> {
   let ok = true;
-  for (const candidate of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+  for (const candidate of databaseFiles(path)) {
     try {
       if (existsSync(candidate)) await unlink(candidate);
     } catch {
@@ -506,6 +527,11 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
   async function openOnce(): Promise<OpenStore | undefined> {
     if (closed || unsupported) return undefined;
     if (open) return open;
+    if (databaseFilesAreLinked(path)) {
+      // Treated like a foreign schema: persist nothing, touch nothing.
+      unsupported = true;
+      return undefined;
+    }
     if (opening) return opening;
     opening = (async () => {
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -817,11 +843,12 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
             : { sinceMs: parsed.sinceMs as number, untilMs: parsed.untilMs };
       }
 
-      for (const row of conn.all<{ id: number; value: string }>(
+      for (const row of conn.all<{ id: unknown; value: unknown }>(
         "SELECT id, value FROM analytics_str",
       )) {
-        handle.strIds.set(row.value, row.id);
-        handle.strValues.set(row.id, row.value);
+        if (!Number.isInteger(row.id) || typeof row.value !== "string") return undefined;
+        handle.strIds.set(row.value, row.id as number);
+        handle.strValues.set(row.id as number, row.value);
       }
       const str = (id: number | null): string | null | undefined => {
         if (id === null) return null;
@@ -1051,6 +1078,28 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
     };
   }
 
+  /** A validated legacy sidecar reduced to the fields of the sidecar contract. */
+  function legacyPresentationFile(file: PersistedPresentationFile): PersistedPresentationFile {
+    const presentation = file.presentation;
+    return {
+      version: file.version,
+      presentationVersion: file.presentationVersion,
+      savedAtMs: file.savedAtMs,
+      // Absent in legacy files; serialization drops it again.
+      frontierAtMs: file.frontierAtMs,
+      sourceIdentity: file.sourceIdentity,
+      coverage: file.coverage,
+      pricingRevision: file.pricingRevision,
+      presentation: presentation
+        ? {
+            home: presentation.home,
+            project: presentation.project,
+            ...(presentation.session === undefined ? {} : { session: presentation.session }),
+          }
+        : null,
+    };
+  }
+
   function writePresentationFile(handle: OpenStore, file: PersistedPresentationFile): void {
     const { conn } = handle;
     const slots: Array<{ slot: string; payload: string }> = [];
@@ -1173,7 +1222,11 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
           const parsed = JSON.parse(await readFile(legacyPresentationPath, "utf8")) as unknown;
           const decoded = decodeAnalyticsPresentation(parsed);
           if (!decoded) return undefined;
-          writePresentationFile(handle, parsed as PersistedPresentationFile);
+          // Only the sidecar contract's fields are carried into the database.
+          writePresentationFile(
+            handle,
+            legacyPresentationFile(parsed as PersistedPresentationFile),
+          );
           return decoded;
         } catch (error) {
           await discardIfCorrupt(error);
