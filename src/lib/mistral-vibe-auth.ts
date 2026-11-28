@@ -99,21 +99,30 @@ export function mistralVibeIdentityKey(apiKey: string): string {
     .digest("hex");
 }
 
-/** Strip one layer of matching dotenv quotes, keeping inner characters intact. */
+/**
+ * Read one dotenv value.
+ *
+ * A quoted value is exactly what sits between its matching quotes: an inline
+ * ` # comment` after the closing quote is not part of it, while a `#` inside the
+ * quotes is. An unquoted value ends at an unescaped inline comment.
+ */
 function unquoteDotenvValue(raw: string): string {
   const trimmed = raw.trim();
-  if (trimmed.length < 2) return trimmed;
-  const first = trimmed[0];
-  const last = trimmed[trimmed.length - 1];
-  if (first === '"' && last === '"') {
-    return trimmed
-      .slice(1, -1)
-      .replace(/\\n/gu, "\n")
-      .replace(/\\"/gu, '"')
-      .replace(/\\\\/gu, "\\");
+  if (trimmed.startsWith('"')) {
+    // The closing quote is the first unescaped one, so `"a\"b"` keeps `a"b`.
+    const match = /^"((?:\\.|[^"\\])*)"/u.exec(trimmed);
+    // An unterminated quote keeps the remainder; it can never be a real key.
+    if (!match) return trimmed.slice(1);
+    return (match[1] ?? "").replace(/\\n/gu, "\n").replace(/\\"/gu, '"').replace(/\\\\/gu, "\\");
   }
-  if (first === "'" && last === "'") return trimmed.slice(1, -1);
-  // An unquoted value ends at an unescaped inline comment.
+  if (trimmed.startsWith("'")) {
+    const match = /^'([^']*)'/u.exec(trimmed);
+    if (!match) return trimmed.slice(1);
+    return match[1] ?? "";
+  }
+  // An unquoted value ends at an inline comment: a `#` that starts the value or
+  // follows whitespace. A `#` glued to the value stays part of it.
+  if (trimmed.startsWith("#")) return "";
   return trimmed.replace(/\s+#.*$/u, "").trim();
 }
 
@@ -123,8 +132,15 @@ function unquoteDotenvValue(raw: string): string {
  * Implements the subset the Vibe CLI writes: comments, an optional `export`
  * prefix, `KEY=VALUE`, and single/double quoting. Unknown lines are ignored so a
  * malformed neighbour cannot hide a valid key.
+ *
+ * The last assignment of a name wins, and an empty assignment never stops the
+ * scan, which is what python-dotenv's `dotenv_values` does for the Vibe CLI: it
+ * merges every parsed line, so a later line overwrites an earlier one and an
+ * empty first line cannot hide a value set further down. A trailing empty
+ * assignment therefore leaves no key at all, exactly as Vibe would read it.
  */
 export function parseDotenvValue(content: string, name: string): string | undefined {
+  let resolved: string | undefined;
   for (const rawLine of content.split(/\r?\n/u)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
@@ -132,10 +148,9 @@ export function parseDotenvValue(content: string, name: string): string | undefi
     const separator = withoutExport.indexOf("=");
     if (separator <= 0) continue;
     if (withoutExport.slice(0, separator).trim() !== name) continue;
-    const value = unquoteDotenvValue(withoutExport.slice(separator + 1));
-    return value || undefined;
+    resolved = unquoteDotenvValue(withoutExport.slice(separator + 1));
   }
-  return undefined;
+  return resolved || undefined;
 }
 
 async function readEnvFileContent(path: string): Promise<string | null> {

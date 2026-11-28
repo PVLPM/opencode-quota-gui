@@ -3,8 +3,12 @@
  * notification policy.
  *
  * The transport and credential discovery are mocked; every request path is
- * asserted through the provider result, and no credential value is ever logged.
+ * asserted through the provider result, and no credential value or private path
+ * is ever reported.
  */
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 const credentialMock = vi.hoisted(() => ({
@@ -92,11 +96,13 @@ function successResult(overrides: Record<string, unknown> = {}) {
 async function fetchWith(params: {
   credentials: MistralVibeCredential[];
   results: Array<unknown>;
+  checkedPaths?: string[];
+  credentialDatabasePaths?: string[];
 }): Promise<QuotaProviderResult> {
   credentialMock.resolveMistralVibeCredentials.mockResolvedValue({
     credentials: params.credentials,
-    checkedPaths: ["/tmp/vibe/.env"],
-    credentialDatabasePaths: [],
+    checkedPaths: params.checkedPaths ?? ["/tmp/vibe/.env"],
+    credentialDatabasePaths: params.credentialDatabasePaths ?? [],
   });
   for (const [index, value] of params.results.entries()) {
     queryMock.queryMistralVibeQuota.mockResolvedValueOnce(value);
@@ -298,6 +304,56 @@ describe("Mistral Vibe accounts and identity", () => {
     const result = await fetchWith({ credentials: [], results: [] });
     expect(result.attempted).toBe(false);
     expect(result.entries).toEqual([]);
+  });
+});
+
+describe("Mistral Vibe diagnostics", () => {
+  it("reports credential source kinds and counts without any absolute path", async () => {
+    const home = path.join(os.tmpdir(), "fixture-home");
+    const envPath = path.join(home, ".vibe", ".env");
+    const databasePath = path.join(home, ".local", "share", "opencode", "opencode.db");
+
+    const result = await fetchWith({
+      credentials: [
+        credential({ source: "env", sourceId: "vibe-env" }),
+        credential({
+          key: "key-two",
+          source: "opencode.db",
+          sourceId: "credential-row-1",
+          label: "Mistral Vibe 2",
+        }),
+      ],
+      results: [successResult(), successResult()],
+      checkedPaths: [envPath],
+      credentialDatabasePaths: [databasePath],
+    });
+
+    expect(result.statusDetails).toEqual([
+      { key: "credential_count", value: "2" },
+      { key: "credential_sources", value: "env | opencode.db" },
+      { key: "credential_source_counts", value: "env=1 | vibe_dotenv=0 | opencode.db=1" },
+    ]);
+
+    // The cache and the JSON export persist every status detail, so neither the
+    // fixture home directory nor a path separator may appear anywhere.
+    const serialized = JSON.stringify(result.statusDetails);
+    expect(serialized).not.toContain(home);
+    expect(serialized).not.toContain(os.tmpdir());
+    expect(serialized).not.toContain(path.sep);
+    expect(serialized).not.toContain("vibe_env_path");
+    expect(serialized).not.toContain("credential_database_paths");
+    expect(JSON.stringify(result)).not.toContain(envPath);
+    expect(JSON.stringify(result)).not.toContain(databasePath);
+  });
+
+  it("enumerates every source kind with zero counts when nothing resolves", async () => {
+    const result = await fetchWith({ credentials: [], results: [] });
+
+    expect(result.statusDetails).toEqual([
+      { key: "credential_count", value: "0" },
+      { key: "credential_sources", value: "(none)" },
+      { key: "credential_source_counts", value: "env=0 | vibe_dotenv=0 | opencode.db=0" },
+    ]);
   });
 });
 

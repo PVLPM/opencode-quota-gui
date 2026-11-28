@@ -24,6 +24,7 @@ import type {
   QuotaProviderAccount,
   QuotaProviderContext,
   QuotaProviderResult,
+  QuotaProviderStatusDetail,
   QuotaToastEntry,
 } from "../lib/entries.js";
 import {
@@ -34,6 +35,7 @@ import {
 import {
   hasMistralVibeCredential,
   type MistralVibeCredential,
+  type MistralVibeCredentialSource,
   resolveMistralVibeCredentials,
 } from "../lib/mistral-vibe-auth.js";
 import { modelProviderMatchesRuntimeId } from "../lib/provider-model-matching.js";
@@ -164,6 +166,37 @@ function accountDescriptor(credential: MistralVibeCredential): QuotaProviderAcco
   };
 }
 
+/** Every credential source this provider reads, in stable report order. */
+const CREDENTIAL_SOURCE_KINDS: readonly MistralVibeCredentialSource[] = [
+  "env",
+  "vibe_dotenv",
+  "opencode.db",
+];
+
+/**
+ * Diagnostics for the credential set: source kinds and counts only.
+ *
+ * The resolved `.env` and OpenCode database paths are absolute and user-specific,
+ * and status details are persisted in the quota cache and the JSON export, so no
+ * path is ever reported here. A source that supplied no key still reports
+ * `0`, which keeps "we looked there and found nothing" distinguishable from
+ * "that source is not read".
+ */
+function credentialSourceStatusDetails(
+  credentials: readonly MistralVibeCredential[],
+): QuotaProviderStatusDetail[] {
+  const counts = CREDENTIAL_SOURCE_KINDS.map(
+    (kind) =>
+      [kind, credentials.filter((credential) => credential.source === kind).length] as const,
+  );
+  const present = counts.filter(([, count]) => count > 0).map(([kind]) => kind);
+  return statusDetailsFromRecord({
+    credential_count: String(credentials.length),
+    credential_sources: present.join(" | ") || "(none)",
+    credential_source_counts: counts.map(([kind, count]) => `${kind}=${count}`).join(" | "),
+  });
+}
+
 export const mistralVibeProvider: QuotaProvider = {
   id: "mistral",
 
@@ -177,13 +210,7 @@ export const mistralVibeProvider: QuotaProvider = {
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
     const resolution = await resolveMistralVibeCredentials({});
-    const statusDetails = statusDetailsFromRecord({
-      credential_count: String(resolution.credentials.length),
-      credential_sources:
-        resolution.credentials.map((entry) => entry.source).join(" | ") || "(none)",
-      vibe_env_path: resolution.checkedPaths.join(" | ") || "(none)",
-      credential_database_paths: resolution.credentialDatabasePaths.join(" | ") || "(none)",
-    });
+    const statusDetails = credentialSourceStatusDetails(resolution.credentials);
 
     if (resolution.credentials.length === 0) {
       return withStatusDetails(notAttemptedResult(), statusDetails);
