@@ -167,12 +167,32 @@ Otherwise the interval's ΔQ stays `unattributed` with a reason
 (`no-activity`, `ambiguous-account`, `unpriced`, `zero-weight`) while recorded
 tokens and costs are still shown. No effort multipliers, no delay buffer.
 
+D7.1 implementation note: attribution is only certified from an activity read
+that reports analytics coverage of the queried intervals. `activity()`
+(`src/gui/analytics-engine.ts`) reports `coverage.complete` from the persisted
+index extent (`coversSince` plus `extent.untilMs`) and only while the coverage is
+trusted (loaded index, trusted coverage, no newer sidecar, readable source); an
+uncovered or stale read schedules the same bounded background refresh a group
+snapshot schedules, never a foreground scan. Until a read certifies coverage the
+snapshot reports `activityUnavailable`: burn, links and stored points stay
+displayed and no interval is reported as completely attributed.
+
 ### D8 Account eligibility
 OpenCode serves a provider through one credential at a time and records no
 per-message account. Activity through provider P is attributable to account A
 only when A is the **only** account of P with observations overlapping the
 interval. Multiple concurrent accounts → `ambiguous-account`. External use of
 the same subscription can never be excluded; the UI always discloses this.
+
+D8.1 implementation note: "sole" is decided from positive evidence only. An
+interval is eligible for account A when no other account of the same provider is
+configured right now (the live card list, because the store keeps no
+configuration timestamps) and no other account has a recorded span overlapping
+the interval — either a successful run or a recorded `error` / `cooldown` /
+`retained` cycle, which proves the card was in the collector snapshot while
+producing no sample. `missing-row` is not presence evidence: the store also
+emits it for a card that left the snapshot. A rival that was removed and has no
+overlapping recorded span therefore leaves the interval attributable.
 
 ### D9 Effort
 Promote `variant` onto `OwnedStep`: absent ⇒ unknown; `"default"` kept

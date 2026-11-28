@@ -61,6 +61,28 @@ export interface UsageActivityInterval {
 export interface UsageActivityResult {
   /** Aligned 1:1 with `UsageActivityQuery.intervals`. */
   intervals: UsageActivityInterval[];
+  /**
+   * Coverage/freshness of the index behind the result. Absent only for a
+   * producer that reads the whole dataset per request and therefore has no
+   * index extent to certify (the in-process legacy model).
+   */
+  coverage?: UsageActivityCoverage;
+}
+
+/**
+ * What one activity read can prove about the queried intervals. A partially
+ * read or stale index cannot prove that a requested interval holds no activity,
+ * so quota-burn attribution may only be certified from a complete read.
+ */
+export interface UsageActivityCoverage {
+  /** The index temporally covers every requested interval and its coverage is trusted. */
+  complete: boolean;
+  /**
+   * The index has no successful sync within its refresh interval, so activity
+   * after the last sync may still be missing. A bounded background refresh was
+   * scheduled; freshness alone never changes an already covered interval.
+   */
+  stale: boolean;
 }
 
 function isQueryInterval(value: unknown): value is UsageActivityQueryInterval {

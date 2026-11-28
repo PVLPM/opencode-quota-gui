@@ -8,8 +8,9 @@
  * analytics: the caller supplies the already-existing activity seam and the
  * most recent quota cards (display labels only).
  *
- * Activity unavailability: a missing callback, a rejected read or a result that
- * does not align 1:1 with the queried intervals leaves every burn interval
+ * Activity unavailability: a missing callback, a rejected read, a result that
+ * does not align 1:1 with the queried intervals, or a result whose analytics
+ * coverage does not certify the queried intervals leaves every burn interval
  * unattributed with no fabricated reason (the `activityUnavailable` flag is the
  * explanation) and no breakdown rows. Quota history itself is still returned.
  *
@@ -50,6 +51,7 @@ import {
   openUsageStoreReadOnly,
   USAGE_IMPORT_PROVIDER_IDS,
   type UsageHistorySlice,
+  type UsageInterruptionKind,
   type UsageReadStore,
   type UsageRivalRun,
   type UsageSeriesInfo,
@@ -84,6 +86,17 @@ const IMPORTED_HARNESS_BY_PROVIDER: Readonly<Record<string, "claude-code" | "cod
   [USAGE_IMPORT_PROVIDER_IDS["claude-code"]]: "claude-code",
   [USAGE_IMPORT_PROVIDER_IDS.codex]: "codex",
 };
+
+/**
+ * Interruption kinds that prove a card was part of the collector's snapshot
+ * while producing no sample (D5). `missing-row` is excluded: the store also
+ * emits it when a card leaves the snapshot, so it is never presence evidence.
+ */
+const PRESENCE_INTERRUPTION_KINDS: ReadonlySet<UsageInterruptionKind> = new Set([
+  "error",
+  "cooldown",
+  "retained",
+]);
 
 const ZERO_TOKENS: CostedTokens = {
   input: 0,
@@ -161,6 +174,11 @@ interface WorkingAccount {
   rivalFirstAtMs: number[];
   /** Prefix maximum of `lastAtMs`; a long earlier run still covers an interval. */
   rivalMaxLastAtMs: number[];
+  /**
+   * Another account of the same provider is configured right now. The store
+   * records no configuration time, so it could have served traffic then.
+   */
+  configuredRival: boolean;
 }
 
 interface ProviderActivity {
@@ -465,6 +483,10 @@ function soleObservedAccount(
   account: WorkingAccount,
   interval: { startMs: number; endMs: number },
 ): boolean {
+  // A configured second account defeats the "sole account" claim regardless of
+  // its measurements: OpenCode records no per-message account, so routing to it
+  // cannot be excluded (D8).
+  if (account.configuredRival) return false;
   const index = lastStartingAtOrBefore(account.rivalFirstAtMs, interval.endMs);
   return index < 0 || (account.rivalMaxLastAtMs[index] ?? 0) < interval.startMs;
 }
@@ -620,6 +642,28 @@ export function createUsageSnapshotBuilder(
         });
       }
     }
+    // A recorded failure/cooldown/retained cycle is presence evidence too: the
+    // card belonged to the collector's snapshot while it produced no sample, so
+    // the account could have served traffic in that span.
+    for (const interruption of slice.interruptions) {
+      if (!PRESENCE_INTERRUPTION_KINDS.has(interruption.kind)) continue;
+      addRivalRun({
+        cardId: interruption.cardId,
+        providerId: interruption.providerId,
+        firstAtMs: interruption.firstAtMs,
+        lastAtMs: interruption.lastAtMs,
+      });
+    }
+    // Accounts the collector knows about right now. Presence in the live cards
+    // proves configuration; the store keeps no configuration timestamps, so a
+    // configured rival may have been in use during any interval.
+    const configuredCardIdsByProvider = new Map<string, Set<string>>();
+    for (const card of cards) {
+      const ids = configuredCardIdsByProvider.get(card.providerId);
+      if (ids === undefined)
+        configuredCardIdsByProvider.set(card.providerId, new Set([card.cardId]));
+      else ids.add(card.cardId);
+    }
 
     groups.sort((left, right) => {
       const leftRank = cardRank.get(left.cardId) ?? Number.POSITIVE_INFINITY;
@@ -650,6 +694,11 @@ export function createUsageSnapshotBuilder(
               (other) => other.cardId !== group.cardId,
             ),
           );
+      const configuredRival =
+        !imported &&
+        [...(configuredCardIdsByProvider.get(group.providerId) ?? [])].some(
+          (cardId) => cardId !== group.cardId,
+        );
       const account: WorkingAccount = {
         cardId: group.cardId,
         providerId: group.providerId,
@@ -665,6 +714,7 @@ export function createUsageSnapshotBuilder(
         source: group.source,
         windows: [],
         ...rivals,
+        configuredRival,
       };
 
       for (const plan of orderPlans(group.plans, card)) {
@@ -760,6 +810,11 @@ export function createUsageSnapshotBuilder(
                 interval.endMs === activity.segments[position]?.endMs,
             );
           if (!aligned) unavailable = true;
+          // An analytics index that only partially covers the queried
+          // intervals (or that is known to be stale) cannot prove that no
+          // activity was missed, so it is treated exactly like a failed read
+          // instead of certifying a possibly incomplete attribution.
+          else if (result.coverage?.complete === false) unavailable = true;
           else activity.result = result;
         });
       }
