@@ -28,6 +28,7 @@ import {
   minimaxChinaCodingPlanProvider,
   minimaxCodingPlanProvider,
 } from "./minimax-coding-plan.js";
+import { mistralVibeProvider } from "./mistral-vibe.js";
 import { nanoGptProvider } from "./nanogpt.js";
 import { ollamaCloudProvider } from "./ollama-cloud.js";
 import { openaiProvider } from "./openai.js";
@@ -62,6 +63,7 @@ const PROVIDERS_BY_ID = {
   "kimi-code-plan-global": kimiCodePlanGlobalProvider,
   "kimi-code-plan-cn": kimiCodePlanCnProvider,
   deepseek: deepseekProvider,
+  mistral: mistralVibeProvider,
   xai: xaiProvider,
   xiaomi: xiaomiProvider,
   "opencode-go": opencodeGoProvider,

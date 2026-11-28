@@ -1,4 +1,14 @@
 import {
+  MISTRAL_VIBE_API_BUDGET_INFO,
+  MISTRAL_VIBE_API_BUDGET_LABEL,
+  MISTRAL_VIBE_API_BUDGET_ROW_KEY,
+  MISTRAL_VIBE_BUDGET_INFO,
+  MISTRAL_VIBE_BUDGET_LABEL,
+  MISTRAL_VIBE_BUDGET_ROW_KEY,
+  MISTRAL_VIBE_ROW_KIND,
+  MISTRAL_VIBE_ROW_RESULT_TYPE,
+} from "../contracts/mistral-vibe-quota.js";
+import {
   CLAUDE_AGENT_RESETS_INFO,
   CLAUDE_AGENT_RESETS_ROW_KEY,
   OPENAI_CREDITS_INFO,
@@ -642,6 +652,36 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
           info: "DeepSeek account availability, shown only when no balance is reported.",
         },
       ],
+    },
+  },
+  {
+    id: "mistral",
+    label: "Mistral Vibe",
+    runtimeIds: ["mistral"],
+    synonyms: ["mistral-vibe", "vibe"],
+    shape: {
+      autoSetup: "usually",
+      authentication: "external_api_key",
+      authFallbacks: ["env_api_key", "global_opencode_config"],
+      quota: "remote_api",
+      optionalVisibilityRows: [
+        {
+          rowKey: MISTRAL_VIBE_BUDGET_ROW_KEY,
+          resultType: MISTRAL_VIBE_ROW_RESULT_TYPE,
+          kind: MISTRAL_VIBE_ROW_KIND,
+          label: MISTRAL_VIBE_BUDGET_LABEL,
+          info: MISTRAL_VIBE_BUDGET_INFO,
+        },
+        {
+          rowKey: MISTRAL_VIBE_API_BUDGET_ROW_KEY,
+          resultType: MISTRAL_VIBE_ROW_RESULT_TYPE,
+          kind: MISTRAL_VIBE_ROW_KIND,
+          label: MISTRAL_VIBE_API_BUDGET_LABEL,
+          info: MISTRAL_VIBE_API_BUDGET_INFO,
+        },
+      ],
+      notes:
+        "Reads the Mistral Vibe billing budget with MISTRAL_API_KEY from the environment, <VIBE_HOME>/.env or an OpenCode Mistral login",
     },
   },
   {

@@ -119,6 +119,9 @@ const PROVIDER_ALIASES: Readonly<Record<string, ProviderAlias>> = {
   "zhipu-coding-plan": { label: "Zhipu", logoKey: "zhipuai" },
   "zhipuai-coding-plan": { label: "Zhipu", logoKey: "zhipuai" },
   "deep-seek": { label: "DeepSeek", logoKey: "deepseek" },
+  // The quota card's product name lives in provider registration; this alias only
+  // names the extra ids a Mistral Vibe source can be recorded under.
+  "mistral-vibe": { label: "Mistral Vibe", logoKey: "mistral" },
   "quota-providers": { label: "Quota providers" },
 };
 

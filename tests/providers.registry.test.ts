@@ -30,6 +30,7 @@ const EXPECTED_PROVIDER_ORDER = [
   "kimi-code-plan-global",
   "kimi-code-plan-cn",
   "deepseek",
+  "mistral",
   "xai",
   "xiaomi",
   "opencode-go",

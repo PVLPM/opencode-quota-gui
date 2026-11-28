@@ -214,6 +214,10 @@ const FIXTURES = {
     percent({ resultType: "quota", window: "month" }),
     value({ resultType: "balance", component: "remaining_credits" }),
   ],
+  mistral: [
+    percent({ resultType: "budget", named: "Vibe budget" }),
+    percent({ resultType: "budget", named: "API budget" }),
+  ],
 } satisfies Record<string, QuotaToastEntry[]>;
 
 describe("provider optional Visibility declarations", () => {
