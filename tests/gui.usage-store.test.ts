@@ -343,6 +343,35 @@ describe("usage store: series identity and run compression", () => {
     expect(runs[1]?.linked).toBe(false);
   });
 
+  it("never links across a recorded interruption inside the continuity tolerance", async () => {
+    const db = await store();
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80)], {
+        collectorRunId: "run-1",
+        attemptedAtMs: BASE,
+      }),
+    );
+    db.recordCycle(
+      observation([], {
+        collectorRunId: "cooldown",
+        attemptedAtMs: BASE + 30_000,
+        interruptions: [
+          { cardId: "card-a", providerId: "alpha", kind: "cooldown", atMs: BASE + 30_000 },
+        ],
+      }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + MINUTE, 70)], {
+        collectorRunId: "run-2",
+        attemptedAtMs: BASE + MINUTE,
+      }),
+    );
+
+    // One minute is inside the 2x poll-interval scheduling tolerance, but the
+    // recorded cooldown is explicit evidence that the gap was not monitored.
+    expect(runsOf(db, ROW_A).map((run) => run.linked)).toEqual([false, false]);
+  });
+
   it("inserts a gap sample as an unlinked run and unlinks the following run", async () => {
     const db = await store();
     db.recordCycle(observation([sample(ROW_A, BASE, 80)]));
@@ -407,6 +436,49 @@ describe("usage store: latest epoch reads", () => {
     expect(runsOf(ROW_A)).toEqual([95, 90]);
     expect(runsOf(ROW_B)).toEqual([50]);
     expect(slice.runs.find((run) => run.seriesId === ROW_B)?.firstAtMs).toBe(BASE + MINUTE);
+    // The run that opened each latest epoch is returned as start evidence, not
+    // as a displayed point.
+    expect(slice.preceding.map((run) => [run.seriesId, run.remainingPercent])).toEqual([
+      [ROW_A, 80],
+      [ROW_B, 50],
+    ]);
+  });
+
+  it("starts a new epoch when a passed reset has no successor reset evidence", async () => {
+    const db = await store();
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80, { resetAtMs: BASE + 2 * MINUTE })], {
+        collectorRunId: "run-1",
+      }),
+    );
+    // The known boundary at +2 min is in the past, and this reading carries no
+    // reset of its own: whether it is still the same window is unknown.
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 5 * MINUTE, 60)], { collectorRunId: "run-2" }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 6 * MINUTE, 55)], { collectorRunId: "run-3" }),
+    );
+
+    const slice = db.queryLatestEpochs();
+    expect(slice.runs.map((run) => run.remainingPercent)).toEqual([60, 55]);
+    expect(slice.preceding.map((run) => run.remainingPercent)).toEqual([80]);
+  });
+
+  it("keeps one epoch while the known boundary has not passed", async () => {
+    const db = await store();
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80, { resetAtMs: BASE + 10 * MINUTE })], {
+        collectorRunId: "run-1",
+      }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 5 * MINUTE, 70)], { collectorRunId: "run-2" }),
+    );
+
+    const slice = db.queryLatestEpochs();
+    expect(slice.runs.map((run) => run.remainingPercent)).toEqual([80, 70]);
+    expect(slice.preceding).toEqual([]);
   });
 
   it("scopes rival coverage to eligible providers and displayed epoch spans", async () => {

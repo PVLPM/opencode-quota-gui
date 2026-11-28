@@ -52,7 +52,10 @@ describe("usage intervals: reset proof", () => {
 
     const current = buildUsageWindowSeries(series(points), { range: "current", nowMs: at(250) });
     expect(current.points).toHaveLength(1);
-    expect(current.axis).toEqual({ startMs: at(180), endMs: at(300) });
+    // The proven exact reset fixes the window start, so the axis includes the
+    // prefix that was not observed; the point itself stays at its own time.
+    expect(current.points[0]?.startMs).toBe(at(180));
+    expect(current.axis).toEqual({ startMs: at(120), endMs: at(300) });
     expect(current.intervals).toHaveLength(1);
     expect(current.intervals[0]?.fromPoint).toBe(0);
     expect(current.intervals[0]?.toPoint).toBe(0);
@@ -238,6 +241,99 @@ describe("usage intervals: estimated reset precision", () => {
   });
 });
 
+describe("usage intervals: uncertain epoch boundaries", () => {
+  const at = (seconds: number): number => BASE + seconds * SECOND;
+
+  it("never measures a decrease across a reset whose successor has no reset evidence", () => {
+    const points = [
+      point({ firstAtMs: at(0), lastAtMs: at(60), remainingPercent: 80, resetAtMs: at(120) }),
+      point({ firstAtMs: at(180), lastAtMs: at(240), remainingPercent: 60 }),
+    ];
+
+    const window = buildUsageWindowSeries(series(points), { range: "lifetime", nowMs: at(250) });
+
+    // The known boundary passed before the later reading, and the reading
+    // carries no reset of its own: whether it belongs to the same window cannot
+    // be established, so the drop is never a measured consumption.
+    expect(window.links).toEqual([{ kind: "boundary", boundary: "uncertain" }]);
+    expect(
+      window.intervals.find((interval) => interval.fromPoint === 0 && interval.toPoint === 1)
+        ?.burnPercentPoints,
+    ).toBeNull();
+    expect(window.totals.observedBurnPercentPoints).toBe(0);
+    // Both measured endpoints stay, no fabricated step appears.
+    expect(window.points.map((item) => item.remainingPercent)).toEqual([80, 60]);
+    expect(window.points.map((item) => item.startMs)).toEqual([at(0), at(180)]);
+  });
+
+  it("classifies the same uncertain rollover after a remaining increase as uncertain", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({ firstAtMs: at(0), remainingPercent: 20, resetAtMs: at(120) }),
+        point({ firstAtMs: at(180), remainingPercent: 40 }),
+      ]),
+      { range: "lifetime", nowMs: at(250) },
+    );
+
+    expect(window.links).toEqual([{ kind: "boundary", boundary: "uncertain" }]);
+    expect(
+      window.intervals.find((interval) => interval.fromPoint === 0 && interval.toPoint === 1)
+        ?.burnPercentPoints,
+    ).toBeNull();
+  });
+
+  it("applies the same rule to an estimated boundary that has passed", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({
+          firstAtMs: at(0),
+          lastAtMs: at(60),
+          remainingPercent: 80,
+          resetAtMs: at(120),
+          resetPrecision: "estimated",
+        }),
+        point({ firstAtMs: at(180), remainingPercent: 60 }),
+      ]),
+      { range: "lifetime", nowMs: at(250) },
+    );
+
+    expect(window.links).toEqual([{ kind: "boundary", boundary: "uncertain" }]);
+    expect(
+      window.intervals.find((interval) => interval.fromPoint === 0 && interval.toPoint === 1)
+        ?.burnPercentPoints,
+    ).toBeNull();
+  });
+
+  it("keeps a comparable decrease while the known boundary has not passed", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({ firstAtMs: at(0), remainingPercent: 80, resetAtMs: at(1_000) }),
+        point({ firstAtMs: at(60), remainingPercent: 70 }),
+      ]),
+      { range: "lifetime", nowMs: at(60) },
+    );
+
+    expect(window.links).toEqual([{ kind: "observed" }]);
+    expect(
+      window.intervals.find((interval) => interval.fromPoint === 0 && interval.toPoint === 1)
+        ?.burnPercentPoints,
+    ).toBe(10);
+  });
+
+  it("keeps the latest epoch to the reading after the uncertain boundary", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({ firstAtMs: at(0), remainingPercent: 80, resetAtMs: at(120) }),
+        point({ firstAtMs: at(180), remainingPercent: 60 }),
+      ]),
+      { range: "current", nowMs: at(250) },
+    );
+
+    expect(window.points.map((item) => item.remainingPercent)).toEqual([60]);
+    expect(window.axis.startMs).toBe(at(180));
+  });
+});
+
 describe("usage intervals: flat runs", () => {
   it("keeps a flat run as its own zero-burn interval beside the following change", () => {
     const window = buildUsageWindowSeries(
@@ -419,6 +515,69 @@ describe("usage intervals: expired current epoch", () => {
     expect(window.coverage.sampleCount).toBe(0);
     expect(window.coverage.firstObservedAtMs).toBeUndefined();
     expect(window.totals.observedBurnPercentPoints).toBe(0);
+  });
+});
+
+describe("usage intervals: current window coverage", () => {
+  const at = (seconds: number): number => BASE + seconds * SECOND;
+
+  it("covers the unobserved prefix of a window opened by an exact reset", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({ firstAtMs: at(0), lastAtMs: at(60), remainingPercent: 80, resetAtMs: at(120) }),
+        point({ firstAtMs: at(180), lastAtMs: at(240), remainingPercent: 95, resetAtMs: at(300) }),
+      ]),
+      { range: "current", nowMs: at(250) },
+    );
+
+    // The window began at the proven reset instant, so the axis covers the part
+    // before the first observation instead of starting at it.
+    expect(window.axis).toEqual({ startMs: at(120), endMs: at(300) });
+    // The prefix stays unobserved: no point and no interval is fabricated there.
+    expect(window.points.map((item) => item.startMs)).toEqual([at(180)]);
+    expect(window.coverage.firstObservedAtMs).toBe(at(180));
+    expect(window.intervals.every((interval) => interval.startMs >= at(180))).toBe(true);
+    expect(window.coverage.observedMs).toBe(60 * SECOND);
+  });
+
+  it("keeps the first observed point as the start when the window start is unknown", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({ firstAtMs: at(0), remainingPercent: 20, resetAtMs: at(1_000) }),
+        point({ firstAtMs: at(180), remainingPercent: 40 }),
+      ]),
+      { range: "current", nowMs: at(250) },
+    );
+
+    // The epoch split at the replenished boundary, so the window start is not
+    // known: the axis keeps starting at the first observation.
+    expect(window.points.map((item) => item.remainingPercent)).toEqual([40]);
+    expect(window.axis.startMs).toBe(at(180));
+  });
+
+  it("does not infer a window start from an estimated reset", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({
+          firstAtMs: at(0),
+          remainingPercent: 80,
+          resetAtMs: at(120),
+          resetPrecision: "estimated",
+        }),
+        point({
+          firstAtMs: at(180),
+          remainingPercent: 95,
+          resetAtMs: at(300),
+          resetPrecision: "estimated",
+        }),
+      ]),
+      { range: "current", nowMs: at(250) },
+    );
+
+    // An estimated (`now + offset`) reset fixes no instant, so it is never used
+    // as a window start even when the rollover is proven.
+    expect(window.points.map((item) => item.remainingPercent)).toEqual([95]);
+    expect(window.axis.startMs).toBe(at(180));
   });
 });
 

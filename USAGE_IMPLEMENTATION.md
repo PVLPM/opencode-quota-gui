@@ -112,6 +112,19 @@ is at/after the earlier observation's `resetAt` and the new `resetAt` is later.
   channel (never new card-DTO fields); standalone quantity rows are out of
   scope because they carry no capacity.
 - no reset information and value increased → `uncertain` boundary.
+- the earlier sample's known `resetAt` is already in the past at the later
+  sample, and the later sample carries no reset of its own → `uncertain`
+  boundary: whether the window rolled over cannot be established, so neither a
+  decrease nor an increase is measured across it. An estimated earlier boundary
+  follows the same rule, because the rollover may have happened anywhere inside
+  the gap. Two samples that both report a reset keep the exact/estimated
+  rollover rules above.
+- `current` axis start: the latest epoch's proven **exact** provider reset when
+  the derivation sees it, otherwise the first observed point of that epoch. A
+  latest-epoch read returns the run that opened the epoch in `preceding`, so the
+  derivation never has to guess. The unobserved prefix is axis space only: no
+  point, link or interval is fabricated for it, and an estimated reset or an
+  unknown duration keeps the first observed point as the start.
 - duplicates (same sample) ignored; out-of-order samples ordered by
   `measuredAtMs`. A sample inside an existing run with the same value only
   increments `sample_count`. A different value never splits or fabricates an
@@ -133,6 +146,10 @@ intervening failure/cooldown/retained cycle **and** the elapsed time is at most
 twice the collector's configured poll interval at that time (timer/sleep
 tolerance). Otherwise the interval is unobserved: dashed connector when both
 endpoints are in the same epoch, disconnected when a boundary intervenes.
+Explicit interruption evidence always wins over the elapsed-time tolerance: a
+recorded failed/cooldown/retained/missing attempt between the two samples, or a
+different collector session, breaks the link even when the elapsed time is
+inside 2×. The tolerance absorbs scheduling jitter only, never a known gap.
 *Technical tolerance (2×) recorded for owner review — see Q3.*
 
 ### D6 Burn

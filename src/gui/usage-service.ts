@@ -582,6 +582,9 @@ export function createUsageSnapshotBuilder(
       list.push({ atMs: conflict.atMs, remainingPercent: conflict.remainingPercent });
       conflictsBySeries.set(conflict.seriesId, list);
     }
+    // For `current` the reader also returns the run that opened each series'
+    // latest epoch, so a proven exact reset can fix the window start.
+    const precedingBySeries = new Map(slice.preceding.map((run) => [run.seriesId, run] as const));
     const cardRank = new Map<string, number>(
       cards.map((card, index) => [card.cardId, index] as const),
     );
@@ -666,6 +669,12 @@ export function createUsageSnapshotBuilder(
 
       for (const plan of orderPlans(group.plans, card)) {
         const conflicts = conflictsBySeries.get(plan.series.rowId);
+        const stored = group.runsBySeries.get(plan.series.rowId) ?? [];
+        // `current` also receives the run that opened the latest epoch: the
+        // derivation slices it off again, and keeps it only as evidence for a
+        // proven exact window start.
+        const preceding =
+          range === "current" ? precedingBySeries.get(plan.series.rowId) : undefined;
         const window = buildUsageWindowSeries(
           {
             rowId: plan.series.rowId as RowId,
@@ -673,7 +682,7 @@ export function createUsageSnapshotBuilder(
             ...(plan.metric !== undefined ? { metric: plan.metric } : {}),
             measurement: plan.series.measurement,
             source: plan.series.source,
-            points: usagePointsFromRuns(group.runsBySeries.get(plan.series.rowId) ?? []),
+            points: usagePointsFromRuns(preceding === undefined ? stored : [preceding, ...stored]),
             ...(conflicts !== undefined ? { conflicts } : {}),
           },
           axis,

@@ -314,7 +314,9 @@ export interface UsageReadStore {
   query(span: { startMs: number; endMs: number }): UsageHistorySlice;
   /**
    * Only the latest reset/identity epoch of every series: the walks back from
-   * the newest run through `usage_runs_series_time`, never a full scan.
+   * the newest run through `usage_runs_series_time`, never a full scan. The run
+   * that opened the epoch is returned in `preceding`, so a caller can place a
+   * proven window start.
    */
   queryLatestEpochs(): UsageHistorySlice;
   close(): void;
@@ -617,6 +619,16 @@ const LATEST_EPOCH_PAGE = 256;
 function startsNewEpoch(older: RunReadRow, newer: RunReadRow): boolean {
   if (older.quantity_unit_json !== newer.quantity_unit_json) return true;
   if (older.capacity_key !== newer.capacity_key) return true;
+  // The older epoch's known boundary passed and the newer run reports none:
+  // comparability is not established, so the walk stops at that boundary.
+  if (
+    newer.reset_at_ms === null &&
+    older.reset_at_ms !== null &&
+    older.last_at_ms <= older.reset_at_ms &&
+    newer.first_at_ms >= older.reset_at_ms
+  ) {
+    return true;
+  }
   if (newer.remaining_percent > older.remaining_percent) return true;
   if (
     older.reset_at_ms === null ||
@@ -637,8 +649,16 @@ function startsNewEpoch(older: RunReadRow, newer: RunReadRow): boolean {
   return true;
 }
 
-/** Newest run first, stopping at the first boundary; uses the series-time index. */
-function latestEpochRuns(conn: SqliteConn, seriesId: string, columns: string): RunReadRow[] {
+/**
+ * Newest run first, stopping at the first boundary; uses the series-time index.
+ * The run that opened the epoch is returned beside it: the derivation needs its
+ * evidence to place the window start without inventing one.
+ */
+function latestEpochRuns(
+  conn: SqliteConn,
+  seriesId: string,
+  columns: string,
+): { epoch: RunReadRow[]; preceding?: RunReadRow } {
   const descending: RunReadRow[] = [];
   let cursor: { firstAtMs: number; runId: number } | undefined;
   for (;;) {
@@ -657,11 +677,15 @@ function latestEpochRuns(conn: SqliteConn, seriesId: string, columns: string): R
           );
     for (const row of page) {
       const newer = descending[descending.length - 1];
-      if (newer !== undefined && startsNewEpoch(row, newer)) return descending.reverse();
+      if (newer !== undefined && startsNewEpoch(row, newer)) {
+        return { epoch: descending.reverse(), preceding: row };
+      }
       descending.push(row);
     }
     const last = page[page.length - 1];
-    if (page.length < LATEST_EPOCH_PAGE || last === undefined) return descending.reverse();
+    if (page.length < LATEST_EPOCH_PAGE || last === undefined) {
+      return { epoch: descending.reverse() };
+    }
     cursor = { firstAtMs: last.first_at_ms, runId: last.run_id };
   }
 }
@@ -800,6 +824,8 @@ function createReader(conn: SqliteConn): UsageReadStore {
     return inReadTransaction(() => {
       const series: UsageSeriesInfo[] = [];
       const runs: UsageStoredRun[] = [];
+      // One run per series: the evidence that opened its latest epoch.
+      const preceding: UsageStoredRun[] = [];
       const conflicts: UsageConflictRecord[] = [];
       const rows = conn.all<SeriesRow>("SELECT * FROM usage_series ORDER BY card_id, series_id");
       // Rival coverage only matters for a provider that has more than one
@@ -820,16 +846,17 @@ function createReader(conn: SqliteConn): UsageReadStore {
       const rivalSpans = new Map<string, { startMs: number; endMs: number }[]>();
       for (const row of rows) {
         const latest = latestEpochRuns(conn, row.series_id, runColumns);
-        if (latest.length === 0) continue;
+        if (latest.epoch.length === 0) continue;
         series.push(seriesRowToInfo(row));
-        for (const run of latest) {
+        if (latest.preceding !== undefined) preceding.push(runRowToStored(latest.preceding));
+        for (const run of latest.epoch) {
           runs.push(runRowToStored(run));
           if (!rivalProviders.has(row.provider_id)) continue;
           const spans = rivalSpans.get(row.provider_id) ?? [];
           spans.push({ startMs: run.first_at_ms, endMs: run.last_at_ms });
           rivalSpans.set(row.provider_id, spans);
         }
-        const firstAtMs = latest[0]?.first_at_ms;
+        const firstAtMs = latest.epoch[0]?.first_at_ms;
         if (firstAtMs !== undefined) {
           conflicts.push(
             ...readConflicts([row.series_id], {
@@ -893,7 +920,7 @@ function createReader(conn: SqliteConn): UsageReadStore {
           left.firstAtMs - right.firstAtMs ||
           left.lastAtMs - right.lastAtMs,
       );
-      return { series, runs, preceding: [], interruptions: [], conflicts, rivalRuns };
+      return { series, runs, preceding, interruptions: [], conflicts, rivalRuns };
     });
   }
 

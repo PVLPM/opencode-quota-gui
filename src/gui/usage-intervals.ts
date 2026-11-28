@@ -6,11 +6,15 @@
  * points, links, intervals and coverage. Attribution is intentionally empty:
  * workstreams C/F fill activity, estimates and breakdown rows.
  *
- * Axis choice: `current` starts at the first point of the latest epoch and ends
- * at `now`, extended to the latest known reset time when that is still in the
- * future (so the chart shows the whole window). Finite ranges are
- * `[now - duration, now]`; `lifetime` is `[first observed, max(now, last
- * observed)]` so stored points are never dropped.
+ * Axis choice: `current` starts at the latest epoch's known start — a proven
+ * exact provider reset, otherwise the first point of that epoch — and ends at
+ * `now`, extended to the latest known reset time when that is still in the
+ * future (so the chart shows the whole window). The part of the window before
+ * the first observation stays axis space: no point and no interval is invented
+ * for it. Finite ranges are `[now - duration, now]`; `lifetime` is
+ * `[first observed, max(now, last observed)]` so stored points are never
+ * dropped. A caller deriving `current` passes enough history to contain the
+ * latest epoch *and* the run that opened it.
  */
 import type { AccountingMetric } from "../contracts/dashboard.js";
 import type { RowId } from "../contracts/identity.js";
@@ -159,6 +163,19 @@ function boundaryBetween(
     return { kind: "reset", ...(reset.atMs !== undefined ? { atMs: reset.atMs } : {}) };
   }
   if (previous.unitKey !== current.unitKey) return { kind: "identity-change" };
+  // The earlier epoch's known boundary is already in the past, but the later
+  // observation carries no reset evidence at all: whether it still belongs to
+  // that window cannot be established, so the change between them is never a
+  // measured consumption. Estimated boundaries follow the same rule, because
+  // the rollover may have happened anywhere inside the gap.
+  if (
+    current.resetAtMs === undefined &&
+    previous.resetAtMs !== undefined &&
+    previous.lastAtMs <= previous.resetAtMs &&
+    current.firstAtMs >= previous.resetAtMs
+  ) {
+    return { kind: "uncertain" };
+  }
   if (current.remainingPercent > previous.remainingPercent) {
     return previous.resetAtMs === undefined && current.resetAtMs === undefined
       ? { kind: "uncertain" }
@@ -193,24 +210,35 @@ function overlap(startA: number, endA: number, startB: number, endB: number): nu
   return Math.max(0, Math.min(endA, endB) - Math.max(startA, startB));
 }
 
+interface UsageEpochStart {
+  index: number;
+  /**
+   * Exact provider reset that opened this epoch. Present only when the reset is
+   * proven and its instant is a provider timestamp, never an estimate.
+   */
+  resetAtMs?: number;
+}
+
 function epochStarts(
   points: readonly UsageSamplePoint[],
   conflicts: readonly UsageConflictPoint[],
-): number[] {
-  const starts: number[] = [];
-  points.forEach((point, index) => {
-    if (index === 0) {
-      starts.push(0);
-      return;
-    }
+): UsageEpochStart[] {
+  const starts: UsageEpochStart[] = [{ index: 0 }];
+  for (let index = 1; index < points.length; index += 1) {
     const previous = points[index - 1] as UsageSamplePoint;
-    if (
-      boundaryBetween(previous, point) !== undefined ||
-      conflicts.some((item) => item.atMs >= previous.firstAtMs && item.atMs <= point.firstAtMs)
-    ) {
-      starts.push(index);
+    const point = points[index] as UsageSamplePoint;
+    if (conflicts.some((item) => item.atMs >= previous.firstAtMs && item.atMs <= point.firstAtMs)) {
+      starts.push({ index });
+      continue;
     }
-  });
+    const boundary = boundaryBetween(previous, point);
+    if (boundary === undefined) continue;
+    starts.push(
+      boundary.kind === "reset" && boundary.atMs !== undefined
+        ? { index, resetAtMs: boundary.atMs }
+        : { index },
+    );
+  }
   return starts;
 }
 
@@ -227,7 +255,8 @@ function includedIndexes(
 
   if (input.range === "current") {
     const starts = epochStarts(points, conflicts);
-    const latestStart = starts[starts.length - 1] ?? 0;
+    const latestEpoch = starts[starts.length - 1] ?? { index: 0 };
+    const latestStart = latestEpoch.index;
     const first = points[latestStart] as UsageSamplePoint;
     const last = points[points.length - 1] as UsageSamplePoint;
     const resetAtMs = last.resetAtMs;
@@ -246,10 +275,18 @@ function includedIndexes(
       return { indexes: [], axis: { startMs: resetAtMs, endMs: input.nowMs } };
     }
     const indexes = points.map((_, index) => index).slice(latestStart);
+    // A proven exact reset fixes where the window began, so the axis covers the
+    // unobserved prefix instead of starting at the first observation. Without
+    // one (estimated reset, replenishment, identity change, conflict) the start
+    // stays unknown and the first observation remains the start.
+    const startMs =
+      latestEpoch.resetAtMs !== undefined && latestEpoch.resetAtMs < first.firstAtMs
+        ? latestEpoch.resetAtMs
+        : first.firstAtMs;
     return {
       indexes,
       axis: {
-        startMs: first.firstAtMs,
+        startMs,
         endMs: resetAtMs !== undefined && resetAtMs > input.nowMs ? resetAtMs : input.nowMs,
       },
     };

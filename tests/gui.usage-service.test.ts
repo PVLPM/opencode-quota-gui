@@ -710,6 +710,27 @@ describe("usage snapshot: ranges and coverage", () => {
     expect(windows[1]?.axis).toEqual({ startMs: at(0), endMs: at(4) });
   });
 
+  it("starts the current axis at a proven exact reset", async () => {
+    const db = await store();
+    const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent", { label: "5h" });
+    record(db, at(0), [{ series: fiveHour, remaining: 80, resetAtMs: at(1) }]);
+    record(db, at(2), [{ series: fiveHour, remaining: 95, resetAtMs: at(4) }]);
+
+    const snapshot = await build(db, {
+      now: () => at(3),
+      activity: activityReturning(() => []),
+    }).usage({ range: "current" });
+
+    const window = snapshot.accounts[0]?.windows[0];
+    // The window began at the provider's exact reset, so the axis covers the
+    // prefix that was never observed while the point stays where it was seen.
+    expect(window?.axis).toEqual({ startMs: at(1), endMs: at(4) });
+    expect(window?.points.map((point) => point.remainingPercent)).toEqual([95]);
+    expect(window?.points[0]?.startMs).toBe(at(2));
+    expect(window?.coverage.firstObservedAtMs).toBe(at(2));
+    expect(window?.totals.observedBurnPercentPoints).toBe(0);
+  });
+
   it("keeps the full requested axis when observation is incomplete", async () => {
     const db = await store();
     const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent", { label: "5h" });
