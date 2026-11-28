@@ -456,6 +456,23 @@ describe("quota provider attribution scope", () => {
     });
   });
 
+  it("does not attribute the Mistral Vibe subscription allowance to API activity", () => {
+    // OpenCode's Mistral activity bills the pay-as-you-go API budget row, never
+    // the Vibe subscription allowance.
+    expect(attributionScopeForRow("mistral", "named:Vibe budget|budget:percent")).toEqual({
+      known: false,
+      providerIds: [],
+    });
+    expect(attributionScopeForRow("mistral", "named:API budget|budget:percent")).toEqual({
+      known: true,
+      providerIds: ["mistral"],
+    });
+    // The Antigravity CLI has no OpenCode runtime id to attribute activity to.
+    expect(
+      attributionScopeForRow("antigravity-cli", "named:gemini-weekly|quota:percent").known,
+    ).toBe(false);
+  });
+
   it("narrows AGY family rows to their model families and rejects unknown families", () => {
     const gemini = attributionScopeForRow("google-agy", "named:Gemini Models weekly|quota:percent");
     expect(gemini.known).toBe(true);

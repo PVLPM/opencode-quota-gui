@@ -116,6 +116,14 @@ describe("provider-metadata", () => {
         quickSetupAnchor: "google-agy-quick-setup",
       },
       {
+        id: "antigravity-cli",
+        autoSetup: "manual_env_config",
+        authentication: "local_cli_auth",
+        quota: "local_cli_report",
+        notes:
+          "Runs the installed Antigravity CLI's own /usage command (agy >= 1.1.11); no install, login or browser step",
+      },
+      {
         id: "zai",
         autoSetup: "yes",
         authentication: "opencode_auth_api_key",
@@ -170,6 +178,15 @@ describe("provider-metadata", () => {
         authentication: "opencode_auth_api_key",
         authFallbacks: ["env_api_key", "global_opencode_config"],
         quota: "remote_api",
+      },
+      {
+        id: "mistral",
+        autoSetup: "usually",
+        authentication: "external_api_key",
+        authFallbacks: ["env_api_key", "global_opencode_config"],
+        quota: "remote_api",
+        notes:
+          "Reads the Mistral Vibe billing budget with MISTRAL_API_KEY from the environment, <VIBE_HOME>/.env or an OpenCode Mistral login",
       },
       {
         id: "xai",

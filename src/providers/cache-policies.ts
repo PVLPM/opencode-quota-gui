@@ -20,6 +20,7 @@ import {
   resolveMiniMaxAuthCached,
   resolveMiniMaxChinaAuthCached,
 } from "../lib/minimax-auth.js";
+import { resolveMistralVibeAuthIdentity } from "../lib/mistral-vibe-auth.js";
 import { resolveNanoGptApiKey } from "../lib/nanogpt-config.js";
 import { resolveOllamaCloudApiKey } from "../lib/ollama-cloud-config.js";
 import { resolveOpenAIAuthIdentity } from "../lib/openai.js";
@@ -282,6 +283,11 @@ export const PROVIDER_CACHE_POLICIES = {
     const resolved = await resolveDeepSeekApiKey();
     return resolved ? { credential: resolved.key } : null;
   }),
+  mistral: {
+    kind: "resolved-auth",
+    resolveIdentity: () => resolveMistralVibeAuthIdentity(),
+  },
+  "antigravity-cli": UNCACHED,
   xai: {
     kind: "resolved-auth",
     resolveIdentity: () => resolveXaiAuthIdentity(),

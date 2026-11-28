@@ -76,6 +76,7 @@ describe("contract layer import rules", () => {
       "src/contracts/dto-guards.ts",
       "src/contracts/guards.ts",
       "src/contracts/identity.ts",
+      "src/contracts/mistral-vibe-quota.ts",
       "src/contracts/openai-quota.ts",
       "src/contracts/provider-auto-resume.ts",
       "src/contracts/provider-failure.ts",

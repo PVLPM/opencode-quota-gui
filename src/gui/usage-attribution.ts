@@ -15,6 +15,7 @@
  * 1:1 with the intervals of exactly one quota window.
  */
 import type { CostedTokens } from "../contracts/dashboard.js";
+import { MISTRAL_VIBE_BUDGET_ROW_KEY } from "../contracts/mistral-vibe-quota.js";
 import type { UsageBreakdownRow, UsageLink, UsageUnattributedReason } from "../contracts/usage.js";
 import type { UsageActivityInterval } from "../contracts/usage-activity.js";
 import {
@@ -113,6 +114,12 @@ const ATTRIBUTION_RUNTIME_IDS: Readonly<Record<CanonicalQuotaProviderId, readonl
   "kimi-code-plan-global": ["kimi-code-plan-global"],
   "kimi-code-plan-cn": ["kimi-code-plan-cn", "kimi-for-coding", "kimi", "kimi-code"],
   deepseek: ["deepseek"],
+  // A Mistral login's API activity bills the account's pay-as-you-go API budget,
+  // never the Vibe subscription allowance (that row is unattributable below).
+  mistral: ["mistral"],
+  // The Antigravity CLI has no OpenCode runtime id: its windows belong to the
+  // Antigravity harness, so no OpenCode activity is attributed to that card.
+  "antigravity-cli": [],
   xai: ["xai"],
   xiaomi: ["xiaomi", "xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp"],
   "opencode-go": ["opencode-go"],
@@ -139,6 +146,9 @@ const ATTRIBUTION_ROW_RULES: Readonly<Record<string, AttributionRowRule>> = {
   "google-agy\u0000named:Gemini Models 5h": { modelFragments: ["gemini"] },
   "google-agy\u0000named:Claude and GPT models weekly": { modelFragments: ["claude", "gpt"] },
   "google-agy\u0000named:Claude and GPT models 5h": { modelFragments: ["claude", "gpt"] },
+  // The Vibe allowance is a subscription meter; OpenCode's Mistral API activity
+  // bills the separate pay-as-you-go API budget row instead.
+  [`mistral\u0000${MISTRAL_VIBE_BUDGET_ROW_KEY}`]: { unattributable: true },
 };
 
 /** AGY rows are family rows; an unrecognized family has unknown billing scope. */
