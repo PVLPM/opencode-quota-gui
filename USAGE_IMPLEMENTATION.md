@@ -13,11 +13,12 @@ Branch `feat/v1.4.0`, base `main@8c0aad2e` (v1.3.3).
 | Workstream | Scope | State |
 |---|---|---|
 | A | Investigation, contracts, plan | done (this file) |
-| B | Observation store + polling capture | pending |
-| C | Effort on owned steps + interval activity query + attribution | pending |
-| D | Claude Code / Codex opt-in import + dedupe | done: parsers/readers, settings, schema v3, scheduling, exclusions, activity query |
-| E | Usage navigation, charts, inspection, breakdown (browser + native) | pending |
-| F | Integration, benchmarks, review, screenshots, draft PR | pending |
+| B | Observation store + polling capture | done: SQLite store, recorder, budget rows with a scheduled reset (D11) |
+| C | Effort on owned steps + interval activity query + attribution | done: certified activity coverage, presence-span account eligibility (D8.1), uncertain reset boundaries (D4) |
+| D | Claude Code / Codex opt-in import + dedupe | done: parsers/readers, settings, schema v3, scheduling, exclusions, activity query, per-session unknown Codex accounts, per-harness delete (D10.3) |
+| E | Usage navigation, charts, inspection, breakdown (browser + native) | done: redesign against owner feedback (shared frame tabs, compact plot, account meta) |
+| F | Integration, benchmarks, review, screenshots, draft PR | in progress: integrated, verified, reviews running; draft PR #41 |
+| G | New providers: Mistral Vibe, Antigravity CLI | done (see capability matrix) |
 
 ## Investigation findings (summary)
 
@@ -372,9 +373,51 @@ Import limitations:
   `UsageSnapshot.importedActivity`; it is never merged into OpenCode
   attribution weights or estimated burn, and Codex activity is included.
 
+Usage history for the new providers: Mistral Vibe budget rows are recorded
+when the platform reports `reset_at` (D11 budget rule); Antigravity CLI quota
+rows are recorded like any quota row. Neither harness's local sessions are
+imported in v1.4.0 (deferred, below).
+
+## Owner decisions (v1.4.0)
+
+- Native Usage tab keeps imported/derived state in memory only; no extra
+  native persistence.
+- Per-harness "Delete imported history" action in Settings (D10.3).
+- Multi-account history uses presence spans (D8.1) rather than a provider-wide
+  ambiguity switch.
+- Stale-but-covered intervals stay attributed; only uncertified activity
+  coverage makes an interval `activityUnavailable`.
+- Budget rows are recorded in Usage history only when they carry a scheduled
+  reset (D11); prepaid balances without a reset are not.
+- Orphaned analytics snapshot `*.tmp` files are reclaimed on load in v1.4.0.
+- Performance fix `a3762d56` (analytics warm reopen) is **not** merged: the fair
+  3-way benchmark measured warm reopen medians of 166.55 ms (v1.3.3), 176.29 ms
+  (v1.4.0) and 197.30 ms (v1.4.0 + fix), so the fix did not justify itself.
+
+## Deferred (not in v1.4.0)
+
+- Mistral Vibe and Antigravity CLI local session import.
+- Analytics model persistence in SQLite instead of `analytics-v3.json`:
+  v1.5, gated on a benchmark against the current JSON snapshot.
+- Deriving a window start from a known window duration when no reset was
+  observed (the current axis starts at the first observation or at an exact
+  proven reset).
+
+## Accepted risks
+
+- An account switch inside a single Codex session that carries no
+  `creator_account_id` is not detected: the session is one unknown account.
+- First-evidence lag: a newly configured account becomes a rival only from its
+  first recorded success or interruption (D8.1), so intervals in the cycles
+  before that may still be attributed to the previous sole account.
+- External use of the same subscription outside OpenCode is never excluded;
+  the UI discloses that attribution is an estimate.
+
 ## Open product questions (owner)
 
-- Q1 — none blocking yet.
+- Q1 — the owner feedback sentence "There is no …" was cut off; it was not
+  interpreted and needs the owner's completion.
+- Q2 — the "Current" range label change is pending owner confirmation.
 - Q3 — continuity tolerance (D5) is a technical choice (2× poll interval).
   Owner may prefer a different presentation rule.
 
@@ -387,3 +430,12 @@ Import limitations:
 - D10 part 2: settings flags, schema v2, importer scheduling after live quota cycles,
   host-native exclusion capture, Codex rate-limit series, imported activity
   query, and privacy/restart/dedupe/exclusion/pricing tests added.
+- External review fixes: certified analytics activity coverage; uncertain reset
+  boundaries and exact-reset axis start; explicit failed/missing polling
+  evidence overrides continuity tolerance; per-session unknown Codex import
+  accounts with neutral "unknown account" labels; presence-span D8 eligibility.
+- Usage redesign finished against owner feedback; Mistral Vibe and Antigravity
+  CLI providers added with golden row-id, visibility and notification tests.
+- Budget-with-reset history, orphaned analytics temp cleanup, and per-harness
+  delete of imported history merged; integrated `pnpm verify` and Windows
+  platform suite run on `feat/v1.4.0`.
