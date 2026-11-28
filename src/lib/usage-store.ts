@@ -148,6 +148,13 @@ const MIGRATIONS: readonly string[] = [
 export const USAGE_INTERRUPTION_KINDS = ["error", "cooldown", "retained", "missing-row"] as const;
 export type UsageInterruptionKind = (typeof USAGE_INTERRUPTION_KINDS)[number];
 
+/**
+ * Interruption kinds that prove a card was part of the collector's snapshot
+ * while producing no sample (D5, D8). `missing-row` is excluded: the store also
+ * emits it when a card left the snapshot, so it is never presence evidence.
+ */
+export const USAGE_PRESENCE_INTERRUPTION_KINDS = ["error", "cooldown", "retained"] as const;
+
 /** Last-seen display metadata for one quota window. Never tokens or raw errors. */
 export interface UsageSeriesMetadata {
   rowId: string;
@@ -241,8 +248,12 @@ export interface UsageCycleObservation {
   nowMs: number;
 }
 
-/** Minimal run coverage used only to detect rival accounts of one provider. */
-export interface UsageRivalRun {
+/**
+ * Earliest and latest evidence of one card, whatever the queried span. Rival
+ * account eligibility (D8) needs the whole collected lifetime of the other
+ * cards of a provider, not just the displayed range.
+ */
+export interface UsagePresenceSpan {
   cardId: string;
   providerId: string;
   firstAtMs: number;
@@ -257,12 +268,8 @@ export interface UsageHistorySlice {
   interruptions: UsageInterruptionRecord[];
   /** Overlapping-time disagreements; the derivation renders them as uncertain. */
   conflicts: UsageConflictRecord[];
-  /**
-   * All stored runs that can overlap a latest epoch, including epochs the
-   * `current` range does not display. Rival-account checks need them because an
-   * older rival epoch can still overlap the displayed one.
-   */
-  rivalRuns?: UsageRivalRun[];
+  /** One span per card of the whole store; never limited to the queried span. */
+  presenceSpans: UsagePresenceSpan[];
 }
 
 export const USAGE_IMPORT_HARNESSES = ["claude-code", "codex"] as const;
@@ -746,6 +753,46 @@ function createReader(conn: SqliteConn): UsageReadStore {
     }));
   }
 
+  /**
+   * One span per card of the whole store: the earliest and latest recorded
+   * evidence of that card, from successful samples and from presence
+   * interruptions. Series rows already carry the MIN/MAX of their own runs, so
+   * this never scans `usage_runs` and stays proportional to cards × windows and
+   * to interruption spans, not to polls. Both `query` and `queryLatestEpochs`
+   * return it, because a rival's first evidence can predate any displayed span.
+   */
+  function readPresenceSpans(): UsagePresenceSpan[] {
+    const kinds = USAGE_PRESENCE_INTERRUPTION_KINDS.map(() => "?").join(", ");
+    return conn
+      .all<{
+        card_id: string;
+        provider_id: string;
+        first_at_ms: number;
+        last_at_ms: number;
+      }>(
+        `SELECT card_id, provider_id, MIN(first_at_ms) AS first_at_ms,
+                MAX(last_at_ms) AS last_at_ms
+         FROM (
+           SELECT card_id, provider_id, first_at_ms, last_at_ms
+           FROM usage_series
+           WHERE source <> 'codex-import'
+           UNION ALL
+           SELECT card_id, provider_id, first_at_ms, last_at_ms
+           FROM usage_interruptions
+           WHERE kind IN (${kinds})
+         )
+         GROUP BY card_id, provider_id
+         ORDER BY provider_id, card_id`,
+        [...USAGE_PRESENCE_INTERRUPTION_KINDS],
+      )
+      .map((row) => ({
+        cardId: row.card_id,
+        providerId: row.provider_id,
+        firstAtMs: row.first_at_ms,
+        lastAtMs: row.last_at_ms,
+      }));
+  }
+
   /** One read transaction gives every returned row one consistent snapshot. */
   function inReadTransaction<T>(read: () => T): T {
     conn.exec("BEGIN");
@@ -816,6 +863,7 @@ function createReader(conn: SqliteConn): UsageReadStore {
           count: row.count,
         })),
         conflicts: readConflicts(seriesIds, { startMs, endMs }),
+        presenceSpans: readPresenceSpans(),
       };
     });
   }
@@ -828,34 +876,12 @@ function createReader(conn: SqliteConn): UsageReadStore {
       const preceding: UsageStoredRun[] = [];
       const conflicts: UsageConflictRecord[] = [];
       const rows = conn.all<SeriesRow>("SELECT * FROM usage_series ORDER BY card_id, series_id");
-      // Rival coverage only matters for a provider that has more than one
-      // live account. Imported series are never OpenCode rivals.
-      const cardsByProvider = new Map<string, Set<string>>();
-      for (const row of rows) {
-        if (row.source === "codex-import") continue;
-        const cards = cardsByProvider.get(row.provider_id);
-        if (cards === undefined) cardsByProvider.set(row.provider_id, new Set([row.card_id]));
-        else cards.add(row.card_id);
-      }
-      const rivalProviders = new Set(
-        [...cardsByProvider]
-          .filter(([, cards]) => cards.size > 1)
-          .map(([providerId]) => providerId),
-      );
-      /** Latest-epoch spans per eligible provider; each can host a rival run. */
-      const rivalSpans = new Map<string, { startMs: number; endMs: number }[]>();
       for (const row of rows) {
         const latest = latestEpochRuns(conn, row.series_id, runColumns);
         if (latest.epoch.length === 0) continue;
         series.push(seriesRowToInfo(row));
         if (latest.preceding !== undefined) preceding.push(runRowToStored(latest.preceding));
-        for (const run of latest.epoch) {
-          runs.push(runRowToStored(run));
-          if (!rivalProviders.has(row.provider_id)) continue;
-          const spans = rivalSpans.get(row.provider_id) ?? [];
-          spans.push({ startMs: run.first_at_ms, endMs: run.last_at_ms });
-          rivalSpans.set(row.provider_id, spans);
-        }
+        for (const run of latest.epoch) runs.push(runRowToStored(run));
         const firstAtMs = latest.epoch[0]?.first_at_ms;
         if (firstAtMs !== undefined) {
           conflicts.push(
@@ -866,61 +892,16 @@ function createReader(conn: SqliteConn): UsageReadStore {
           );
         }
       }
-      // Read rival runs only around displayed latest epochs, never across the
-      // dead gap between a dormant series and the live one. A run can only
-      // overlap a displayed interval if it overlaps some latest-epoch span, so
-      // merge those spans per provider and query each merged range.
-      const rivalRuns: UsageRivalRun[] = [];
-      for (const [providerId, spans] of rivalSpans) {
-        spans.sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
-        let merged: { startMs: number; endMs: number } | undefined;
-        const flush = (): void => {
-          if (merged === undefined) return;
-          const range = merged;
-          merged = undefined;
-          rivalRuns.push(
-            ...conn
-              .all<{
-                card_id: string;
-                provider_id: string;
-                first_at_ms: number;
-                last_at_ms: number;
-              }>(
-                `SELECT s.card_id, s.provider_id, r.first_at_ms, r.last_at_ms
-                 FROM usage_runs r JOIN usage_series s ON s.series_id = r.series_id
-                 WHERE s.provider_id = ?
-                   AND s.source <> 'codex-import'
-                   AND r.last_at_ms >= ?
-                   AND r.first_at_ms <= ?
-                 ORDER BY s.card_id, r.first_at_ms, r.last_at_ms`,
-                [providerId, range.startMs, range.endMs],
-              )
-              .map((row) => ({
-                cardId: row.card_id,
-                providerId: row.provider_id,
-                firstAtMs: row.first_at_ms,
-                lastAtMs: row.last_at_ms,
-              })),
-          );
-        };
-        for (const span of spans) {
-          if (merged !== undefined && span.startMs <= merged.endMs) {
-            merged.endMs = Math.max(merged.endMs, span.endMs);
-          } else {
-            flush();
-            merged = { ...span };
-          }
-        }
-        flush();
-      }
-      rivalRuns.sort(
-        (left, right) =>
-          left.providerId.localeCompare(right.providerId) ||
-          left.cardId.localeCompare(right.cardId) ||
-          left.firstAtMs - right.firstAtMs ||
-          left.lastAtMs - right.lastAtMs,
-      );
-      return { series, runs, preceding, interruptions: [], conflicts, rivalRuns };
+      // Interruption evidence does not need a second query here: `presenceSpans`
+      // already covers every card of the store for every range (D8).
+      return {
+        series,
+        runs,
+        preceding,
+        interruptions: [],
+        conflicts,
+        presenceSpans: readPresenceSpans(),
+      };
     });
   }
 

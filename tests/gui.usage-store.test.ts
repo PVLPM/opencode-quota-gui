@@ -481,7 +481,7 @@ describe("usage store: latest epoch reads", () => {
     expect(slice.preceding).toEqual([]);
   });
 
-  it("scopes rival coverage to eligible providers and displayed epoch spans", async () => {
+  it("reports one presence span per card from its earliest evidence to its latest", async () => {
     const db = await store();
     const alphaB = series(ROW_B, { providerId: "alpha", providerLabel: "Alpha" });
     const dormantRow = "card-dormant#window:five_hour|quota:percent";
@@ -529,24 +529,78 @@ describe("usage store: latest epoch reads", () => {
     );
 
     const slice = db.queryLatestEpochs();
-    // The dormant epoch's query returns only what overlaps that epoch; the
-    // dead gap is never scanned, so card-b's pre-dormant run is not reported.
-    expect(
-      slice.rivalRuns?.filter((run) => run.cardId === "card-b").map((run) => run.firstAtMs),
-    ).toEqual([BASE + 100 * MINUTE]);
-    expect(slice.rivalRuns).toContainEqual({
+    // A rival's presence starts at its earliest evidence, including history
+    // that predates the displayed latest epoch (D8.1).
+    expect(slice.presenceSpans).toContainEqual({
+      cardId: "card-b",
+      providerId: "alpha",
+      firstAtMs: BASE - 10 * MINUTE,
+      lastAtMs: BASE + 100 * MINUTE,
+    });
+    expect(slice.presenceSpans).toContainEqual({
       cardId: "card-dormant",
       providerId: "alpha",
       firstAtMs: BASE,
       lastAtMs: BASE,
     });
-    // An imported series never makes a single-account provider eligible.
-    expect(slice.rivalRuns?.some((run) => run.providerId === "beta")).toBe(false);
-    expect([...new Set(slice.rivalRuns?.map((run) => run.cardId))].sort()).toEqual([
+    // An imported series is never an OpenCode account presence.
+    expect(slice.presenceSpans.every((span) => span.cardId !== "codex-import:beta")).toBe(true);
+    expect(slice.presenceSpans.map((span) => span.cardId)).toEqual([
       "card-a",
       "card-b",
       "card-dormant",
+      "card-beta",
     ]);
+    // The span is whole-history even when the queried range is not.
+    expect(
+      db
+        .query({ startMs: BASE + 100 * MINUTE, endMs: BASE + 100 * MINUTE })
+        .presenceSpans.find((span) => span.cardId === "card-b")?.firstAtMs,
+    ).toBe(BASE - 10 * MINUTE);
+  });
+
+  it("reports presence spans for failed-only cards and never for missing rows", async () => {
+    const db = await store();
+    // card-b never produces a sample, only a failed attempt.
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80)], {
+        collectorRunId: "cycle-1",
+        observedCards: [
+          { cardId: "card-a", providerId: "alpha", atMs: BASE },
+          { cardId: "card-b", providerId: "alpha", atMs: BASE },
+        ],
+        interruptions: [{ cardId: "card-b", providerId: "alpha", kind: "error", atMs: BASE }],
+      }),
+    );
+    // card-a leaves the snapshot while its provider is still attempted.
+    db.recordCycle(
+      observation([], {
+        collectorRunId: "cycle-2",
+        nowMs: BASE + MINUTE,
+        observedCards: [{ cardId: "card-b", providerId: "alpha", atMs: BASE + MINUTE }],
+        providerIds: ["alpha"],
+        interruptions: [
+          { cardId: "card-b", providerId: "alpha", kind: "error", atMs: BASE + MINUTE },
+        ],
+      }),
+    );
+
+    const slice = db.query({ startMs: 0, endMs: BASE + MINUTE });
+    expect(slice.interruptions.map((item) => [item.cardId, item.kind])).toEqual([
+      ["card-b", "error"],
+      ["card-a", "missing-row"],
+    ]);
+    expect(slice.presenceSpans).toEqual([
+      { cardId: "card-a", providerId: "alpha", firstAtMs: BASE, lastAtMs: BASE },
+      {
+        cardId: "card-b",
+        providerId: "alpha",
+        firstAtMs: BASE,
+        lastAtMs: BASE + MINUTE,
+      },
+    ]);
+    // The latest-epoch read carries the same evidence, interruptions included.
+    expect(db.queryLatestEpochs().presenceSpans).toEqual(slice.presenceSpans);
   });
 });
 

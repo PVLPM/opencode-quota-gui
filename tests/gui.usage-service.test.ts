@@ -739,6 +739,142 @@ describe("usage snapshot: attribution", () => {
     expect(interval?.attributedBurnPercentPoints).toBe(10);
     expect(interval?.unattributedReason).toBeUndefined();
   });
+
+  it("attributes history that predates a rival's first recorded evidence", async () => {
+    const db = await store();
+    const kept = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    const later = series("anthropic:bbbbbb", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: kept, remaining: 80 }]);
+    record(db, at(1), [{ series: kept, remaining: 70 }]);
+    // The rival enters the collector snapshot only at minute 10; the collector
+    // records every configured account every cycle, so minutes 0-1 predate it.
+    record(db, at(10), [{ series: later, remaining: 60 }]);
+    record(db, at(11), [{ series: later, remaining: 55 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+      latestQuotaCards: () => [card("anthropic:aaaaaa", []), card("anthropic:bbbbbb", [])],
+    }).usage({ range: "lifetime" });
+
+    const keptInterval = snapshot.accounts.find((account) => account.accountKey === kept.cardId)
+      ?.windows[0]?.intervals[0];
+    expect(keptInterval?.attributedBurnPercentPoints).toBe(10);
+    expect(keptInterval?.unattributedReason).toBeUndefined();
+    // The rival's own first interval still overlaps the kept account's presence,
+    // which is live again now, so it stays ambiguous.
+    const laterInterval = snapshot.accounts.find((account) => account.accountKey === later.cardId)
+      ?.windows[0]?.intervals[0];
+    expect(laterInterval?.unattributedReason).toBe("ambiguous-account");
+  });
+
+  it("marks only the newest interval ambiguous for a live rival with no recorded evidence", async () => {
+    const db = await store();
+    const kept = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: kept, remaining: 90 }]);
+    record(db, at(1), [{ series: kept, remaining: 80 }]);
+    record(db, at(2), [{ series: kept, remaining: 70 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+      // The second account was just configured: no cycle has recorded it yet,
+      // so its configuration time is unknown and only "now" is proven.
+      latestQuotaCards: () => [card("anthropic:aaaaaa", []), card("anthropic:bbbbbb", [])],
+    }).usage({ range: "lifetime" });
+
+    const intervals = snapshot.accounts[0]?.windows[0]?.intervals;
+    expect(intervals?.map((interval) => interval.attributedBurnPercentPoints)).toEqual([10, 0]);
+    expect(intervals?.[0]?.unattributedReason).toBeUndefined();
+    expect(intervals?.[1]?.unattributedReason).toBe("ambiguous-account");
+  });
+
+  it("keeps a rival's presence conservative across a removal and re-add gap", async () => {
+    const db = await store();
+    const kept = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    const rival = series("anthropic:bbbbbb", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: rival, remaining: 40 }]);
+    record(db, at(1), [{ series: rival, remaining: 35 }]);
+    record(db, at(5), [{ series: kept, remaining: 80 }]);
+    record(db, at(6), [{ series: kept, remaining: 70 }]);
+    record(db, at(10), [{ series: rival, remaining: 30 }]);
+    record(db, at(11), [{ series: rival, remaining: 25 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+      // The rival is not configured now; its span still brackets the interval.
+      latestQuotaCards: () => [card("anthropic:aaaaaa", [])],
+    }).usage({ range: "lifetime" });
+
+    const keptInterval = snapshot.accounts.find((account) => account.accountKey === kept.cardId)
+      ?.windows[0]?.intervals[0];
+    expect(keptInterval?.burnPercentPoints).toBe(10);
+    expect(keptInterval?.unattributedReason).toBe("ambiguous-account");
+  });
+
+  it("attributes an interval that ends before a removed rival's first evidence", async () => {
+    const db = await store();
+    const kept = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    const removed = series("anthropic:bbbbbb", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: removed, remaining: 60 }]);
+    record(db, at(1), [{ series: removed, remaining: 55 }]);
+    record(db, at(10), [{ series: kept, remaining: 80 }]);
+    record(db, at(11), [{ series: kept, remaining: 70 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+      latestQuotaCards: () => [card("anthropic:aaaaaa", [])],
+    }).usage({ range: "lifetime" });
+
+    const keptAccount = snapshot.accounts.find((account) => account.accountKey === kept.cardId);
+    const interval = keptAccount?.windows[0]?.intervals[0];
+    expect(interval?.attributedBurnPercentPoints).toBe(10);
+    expect(interval?.unattributedReason).toBeUndefined();
+  });
+
+  it("never calls the store's first cycle sole when two accounts enter together", async () => {
+    const db = await store();
+    const first = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    const second = series("anthropic:bbbbbb", "window:five_hour|quota:percent");
+    // History starts with the store: neither account predates the other.
+    for (const minute of [0, 1]) {
+      record(db, at(minute), [
+        { series: first, remaining: minute === 0 ? 80 : 70 },
+        { series: second, remaining: minute === 0 ? 60 : 55 },
+      ]);
+    }
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+      latestQuotaCards: () => [card("anthropic:aaaaaa", []), card("anthropic:bbbbbb", [])],
+    }).usage({ range: "lifetime" });
+
+    for (const account of snapshot.accounts) {
+      const interval = account.windows[0]?.intervals[0];
+      expect(interval?.attributedBurnPercentPoints).toBe(0);
+      expect(interval?.unattributedReason).toBe("ambiguous-account");
+    }
+  });
+
+  it("reports a failed rival in the current range", async () => {
+    const db = await store();
+    const kept = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: kept, remaining: 80 }]);
+    record(
+      db,
+      at(1),
+      [{ series: kept, remaining: 70 }],
+      [{ cardId: "anthropic:bbbbbb", providerId: "anthropic", kind: "cooldown", atMs: at(0.5) }],
+    );
+
+    // The latest-epoch read must carry interruption evidence: a rival that only
+    // ever failed still defeats a "sole account" claim.
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+    }).usage({ range: "current" });
+
+    const interval = snapshot.accounts[0]?.windows[0]?.intervals[0];
+    expect(interval?.burnPercentPoints).toBe(10);
+    expect(interval?.unattributedReason).toBe("ambiguous-account");
+  });
 });
 
 describe("usage snapshot: history availability", () => {
