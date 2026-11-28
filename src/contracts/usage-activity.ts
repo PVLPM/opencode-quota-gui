@@ -62,9 +62,11 @@ export interface UsageActivityResult {
   /** Aligned 1:1 with `UsageActivityQuery.intervals`. */
   intervals: UsageActivityInterval[];
   /**
-   * Coverage/freshness of the index behind the result. Absent only for a
-   * producer that reads the whole dataset per request and therefore has no
-   * index extent to certify (the in-process legacy model).
+   * Coverage/freshness of the span this producer actually read. Attribution is
+   * certified only from `complete: true`; an absent value never certifies
+   * anything, so a producer that cannot prove its span must leave it out (the
+   * burn then stays unattributed instead of being allocated to whichever models
+   * the partial read happened to contain).
    */
   coverage?: UsageActivityCoverage;
 }

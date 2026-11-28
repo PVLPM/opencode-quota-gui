@@ -189,6 +189,8 @@ function aligned(
       unpricedTokens: 0,
       unknownTokens: 0,
     })),
+    // A stub read spans exactly what it was asked for, so it certifies it.
+    coverage: { complete: true, stale: false },
   };
 }
 
@@ -651,6 +653,7 @@ describe("usage snapshot: attribution", () => {
           unidentifiedTokens: 50,
           unidentifiedSteps: 1,
         })),
+        coverage: { complete: true, stale: false },
       }),
     }).usage({ range: "lifetime" });
 
@@ -949,6 +952,28 @@ describe("usage snapshot: ranges and coverage", () => {
     expect(window?.totals.observedBurnPercentPoints).toBe(0);
   });
 
+  it("does not start the current axis at a reset contradicted inside the preceding run", async () => {
+    const db = await store();
+    const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent", { label: "5h" });
+    record(db, at(0), [{ series: fiveHour, remaining: 80, resetAtMs: at(1) }]);
+    // A different value reported at the same instant is conflict evidence
+    // inside the run that opened the latest epoch. That run is start evidence,
+    // not a displayed point, so the read must include its conflict range too.
+    record(db, at(0), [{ series: fiveHour, remaining: 55 }]);
+    record(db, at(2), [{ series: fiveHour, remaining: 95, resetAtMs: at(4) }]);
+
+    const snapshot = await build(db, {
+      now: () => at(3),
+      activity: activityReturning(() => []),
+    }).usage({ range: "current" });
+
+    const window = snapshot.accounts[0]?.windows[0];
+    // The preceding run cannot be trusted, so the window start is unproven: the
+    // axis starts at the first observation instead of the exact reset.
+    expect(window?.axis).toEqual({ startMs: at(2), endMs: at(4) });
+    expect(window?.points.map((point) => point.remainingPercent)).toEqual([95]);
+  });
+
   it("keeps the full requested axis when observation is incomplete", async () => {
     const db = await store();
     const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent", { label: "5h" });
@@ -1087,6 +1112,29 @@ describe("usage snapshot: unavailable activity and storage", () => {
     expect(window?.intervals[0]?.attributedBurnPercentPoints).toBe(0);
     expect(window?.intervals[0]?.unattributedBurnPercentPoints).toBe(10);
     expect(window?.intervals[0]?.activity).toEqual([]);
+    expect(window?.breakdown).toEqual([]);
+  });
+
+  it("never certifies attribution from a read that reports no coverage at all", async () => {
+    const db = await store();
+    const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: fiveHour, remaining: 80 }]);
+    record(db, at(1), [{ series: fiveHour, remaining: 70 }]);
+
+    const snapshot = await build(db, {
+      // Aligned with the real query, but with no coverage of its own: the
+      // producer read something and never certified what.
+      activity: async (query) => ({ intervals: aligned(query, () => [entry()]).intervals }),
+    }).usage({ range: "lifetime" });
+
+    // A partial producer that cannot certify its span must never have its
+    // observed burn allocated to the models it happens to contain.
+    expect(snapshot.activityUnavailable).toBe(true);
+    expect(snapshot.models).toEqual([]);
+    const window = snapshot.accounts[0]?.windows[0];
+    expect(window?.points).toHaveLength(2);
+    expect(window?.intervals[0]?.attributedBurnPercentPoints).toBe(0);
+    expect(window?.intervals[0]?.unattributedBurnPercentPoints).toBe(10);
     expect(window?.breakdown).toEqual([]);
   });
 

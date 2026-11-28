@@ -9,8 +9,8 @@
  * most recent quota cards (display labels only).
  *
  * Activity unavailability: a missing callback, a rejected read, a result that
- * does not align 1:1 with the queried intervals, or a result whose analytics
- * coverage does not certify the queried intervals leaves every burn interval
+ * does not align 1:1 with the queried intervals, or a result without a
+ * positively complete analytics coverage leaves every burn interval
  * unattributed with no fabricated reason (the `activityUnavailable` flag is the
  * explanation) and no breakdown rows. Quota history itself is still returned.
  *
@@ -795,11 +795,13 @@ export function createUsageSnapshotBuilder(
                 interval.endMs === activity.segments[position]?.endMs,
             );
           if (!aligned) unavailable = true;
-          // An analytics index that only partially covers the queried
-          // intervals (or that is known to be stale) cannot prove that no
-          // activity was missed, so it is treated exactly like a failed read
-          // instead of certifying a possibly incomplete attribution.
-          else if (result.coverage?.complete === false) unavailable = true;
+          // Attribution is certified only from a positively complete read. An
+          // analytics index that only partially covers the queried intervals
+          // (or that is known to be stale) cannot prove that no activity was
+          // missed, and a producer that reports no coverage at all has merely
+          // not certified the span it read, so both are treated exactly like a
+          // failed read instead of claiming a possibly incomplete attribution.
+          else if (result.coverage?.complete !== true) unavailable = true;
           else activity.result = result;
         });
       }

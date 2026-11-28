@@ -478,7 +478,13 @@ export function createDashboardReadSource(
         return (await loadLegacyModel()).groups(query, now());
       },
       async activity(query) {
-        return (await loadLegacyModel()).activity(query);
+        // The legacy model is rebuilt from the whole in-memory dataset per
+        // request, so it read every activity the source can offer: the queried
+        // intervals are certified rather than merely unpruned.
+        return {
+          ...(await loadLegacyModel()).activity(query),
+          coverage: { complete: true, stale: false },
+        };
       },
       // The in-memory dataset is rebuilt per request; there is no worker.
       async refresh() {},
