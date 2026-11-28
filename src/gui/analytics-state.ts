@@ -12,7 +12,7 @@
  * compaction markers).
  */
 import { existsSync } from "node:fs";
-import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type { HomeSnapshot, ProjectSnapshot, SessionSnapshot } from "../contracts/dashboard.js";
@@ -26,6 +26,7 @@ import {
   rawAssistantRowFingerprint,
 } from "../lib/opencode-storage.js";
 import { getAnalyticsPricingFingerprint } from "./analytics-pricing-revision.js";
+import { createGuiLogger, type GuiLogger } from "./log.js";
 
 /** 4: compact fingerprints carry unknown-vs-zero cache telemetry (v3 files rebuild). */
 /** 5: compact occurrences persist recorded reasoning effort (v4 files rebuild). */
@@ -946,11 +947,64 @@ export async function saveAnalyticsSnapshot(
 
 /** Load a snapshot; missing, corrupt, or unsupported files are ignored. */
 export async function loadAnalyticsSnapshot(path: string): Promise<AnalyticsState | undefined> {
+  await removeOrphanedAnalyticsTemps(path);
   try {
     if (!existsSync(path)) return undefined;
     const text = await readFile(path, "utf8");
     return decodeAnalyticsState(JSON.parse(text) as unknown);
   } catch {
     return undefined;
+  }
+}
+
+const analyticsLogger: GuiLogger = createGuiLogger();
+
+/**
+ * Exactly this module's writer temp naming for the compact snapshot and its
+ * presentation sidecar: `<base>.<pid>.<base36>.tmp`. The shared atomic helpers
+ * in `src/lib/atomic-json.ts` use `.tmp-<pid>-<ts>-<hex>` and must never match.
+ */
+const ANALYTICS_TEMP_PATTERN = /^analytics-v3\.json(?:\.presentation\.json)?\.\d+\.[a-z0-9]+\.tmp$/;
+
+/** A concurrent writer mid-save is never touched; only abandoned temps are. */
+const ANALYTICS_TEMP_ORPHAN_MAX_AGE_MS = 3_600_000;
+
+function errorCodeOf(error: unknown): string {
+  if (error !== null && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) return code;
+  }
+  return "unknown";
+}
+
+/**
+ * Best-effort removal of this writer's orphaned temp files next to the compact
+ * snapshot. A crash between temp write and rename leaves them behind forever;
+ * load/startup is the one place they can be reclaimed. Never throws, never
+ * logs paths, and never touches any other file.
+ */
+async function removeOrphanedAnalyticsTemps(snapshotPath: string): Promise<void> {
+  try {
+    const directory = dirname(snapshotPath);
+    const entries = await readdir(directory, { withFileTypes: true });
+    const cutoffMs = Date.now() - ANALYTICS_TEMP_ORPHAN_MAX_AGE_MS;
+    let removed = 0;
+    for (const entry of entries) {
+      if (!ANALYTICS_TEMP_PATTERN.test(entry.name)) continue;
+      const candidate = join(directory, entry.name);
+      try {
+        const stats = await lstat(candidate);
+        if (!stats.isFile() || stats.mtimeMs > cutoffMs) continue;
+        await unlink(candidate);
+        removed += 1;
+      } catch {
+        // Best effort: the temp file survives until the next load.
+      }
+    }
+    if (removed > 0) {
+      analyticsLogger.info("analytics orphaned snapshot temps removed", String(removed));
+    }
+  } catch (error) {
+    analyticsLogger.warn("analytics orphaned snapshot temp cleanup failed", errorCodeOf(error));
   }
 }
