@@ -47,6 +47,7 @@ import type {
   UsageActivityResult,
 } from "../contracts/usage-activity.js";
 import { getGuiPrivateStatePath } from "../lib/private-state-paths.js";
+import { hasUnconfirmedUsageAccountContinuity } from "../lib/provider-metadata.js";
 import {
   openUsageStoreReadOnly,
   USAGE_IMPORT_PROVIDER_IDS,
@@ -719,6 +720,9 @@ export function createUsageSnapshotBuilder(
             source: plan.series.source,
             points: usagePointsFromRuns(preceding === undefined ? stored : [preceding, ...stored]),
             ...(conflicts !== undefined ? { conflicts } : {}),
+            ...(hasUnconfirmedUsageAccountContinuity(group.providerId)
+              ? { accountContinuity: "unconfirmed" as const }
+              : {}),
           },
           axis,
         );

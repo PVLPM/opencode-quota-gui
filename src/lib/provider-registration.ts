@@ -107,6 +107,12 @@ export interface QuotaProviderRegistrationSourceEntry {
   runtimeIds: readonly string[];
   synonyms: readonly string[];
   liveLocalUsage?: true;
+  /**
+   * The source reports no account identity, so two of its measurements can
+   * never be proven to belong to the same account: Usage keeps every
+   * observation but never reads a drop between two of them as consumption.
+   */
+  usageAccountContinuity?: "unconfirmed";
   shape: QuotaProviderShapeSource;
 }
 
@@ -516,6 +522,9 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
     // harness, and nothing proves it serves an OpenCode provider.
     runtimeIds: [],
     synonyms: ["agy", "antigravity"],
+    // `agy /usage` names no account and exposes no account-change signal; a
+    // login switch would otherwise splice two subscriptions into one series.
+    usageAccountContinuity: "unconfirmed",
     shape: {
       autoSetup: "manual_env_config",
       authentication: "local_cli_auth",

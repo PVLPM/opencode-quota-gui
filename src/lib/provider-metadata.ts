@@ -138,6 +138,13 @@ const LIVE_LOCAL_USAGE_PROVIDER_ID_SET = new Set<string>(
   }),
 );
 
+const UNCONFIRMED_USAGE_CONTINUITY_PROVIDER_ID_SET = new Set<string>(
+  catalogKeys().filter((id) => {
+    const source = providerRegistration(id);
+    return "usageAccountContinuity" in source && source.usageAccountContinuity === "unconfirmed";
+  }),
+);
+
 export function normalizeQuotaProviderId(id: string): string {
   const normalized = id.trim().toLowerCase();
   return QUOTA_PROVIDER_ID_SYNONYMS[normalized] ?? normalized;
@@ -199,4 +206,9 @@ export function getQuotaProviderIdsForRuntimeId(id: string): readonly CanonicalQ
 
 export function isLiveLocalUsageProviderId(id: string): boolean {
   return LIVE_LOCAL_USAGE_PROVIDER_ID_SET.has(normalizeQuotaProviderId(id));
+}
+
+/** True when the provider's Usage history cannot prove account continuity. */
+export function hasUnconfirmedUsageAccountContinuity(id: string): boolean {
+  return UNCONFIRMED_USAGE_CONTINUITY_PROVIDER_ID_SET.has(normalizeQuotaProviderId(id));
 }

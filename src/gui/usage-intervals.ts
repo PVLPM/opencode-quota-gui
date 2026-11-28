@@ -65,6 +65,12 @@ export interface UsageSeriesInput {
   source?: UsageSource;
   /** Conflicts render as `uncertain` boundaries, never as stored steps. */
   conflicts?: readonly UsageConflictPoint[];
+  /**
+   * `unconfirmed`: the source names no account, so a decrease between two
+   * runs may be an account switch. Such a drop becomes an `uncertain`
+   * boundary instead of measured consumption; the points stay.
+   */
+  accountContinuity?: "unconfirmed";
 }
 
 export interface UsageAxisInput {
@@ -188,6 +194,7 @@ function linkBetween(
   previous: UsageSamplePoint,
   current: UsageSamplePoint,
   conflicts: readonly UsageConflictPoint[],
+  accountContinuity: UsageSeriesInput["accountContinuity"],
 ): UsageLink {
   const conflict = conflicts.find(
     (item) => item.atMs >= previous.firstAtMs && item.atMs <= current.firstAtMs,
@@ -202,6 +209,11 @@ function linkBetween(
       boundary: boundary.kind,
       ...(boundary.atMs !== undefined ? { atMs: boundary.atMs } : {}),
     };
+  }
+  // Without a confirmed account, equal readings claim nothing, but a drop
+  // could belong to a different subscription, so it is never a burn.
+  if (accountContinuity === "unconfirmed" && current.remainingPercent < previous.remainingPercent) {
+    return { kind: "boundary", boundary: "uncertain" };
   }
   return { kind: current.linked ? "observed" : "unobserved" };
 }
@@ -442,6 +454,7 @@ export function buildUsageWindowSeries(
         included[position - 1] as UsageSamplePoint,
         included[position] as UsageSamplePoint,
         conflicts,
+        input.accountContinuity,
       ),
     );
   }
