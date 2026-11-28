@@ -75,15 +75,13 @@ timestamp cannot always be detected by a timestamp delta.
   `focusSessionId` and the snapshot collections are arrays. Present but
   malformed or duplicate session data rejects the sidecar; absent legacy
   session data means an empty list.
-- Saving captures the sidecar candidate before its first await. For the standard
-  `<snapshot>.presentation.json` path it stats the compact snapshot and budgets
-  the whole sidecar at `min(4 MiB, compact snapshot bytes)`, evicting
-  LRU-oldest sessions until it fits. Home/Project are preserved even if they
-  alone exceed the budget, so session DTOs cannot add growth beyond the compact
-  snapshot size.
-- If the matching compact snapshot is absent/unreadable, or the sidecar path is
-  nonstandard, sessions are omitted rather than serializing the compact state
-  again.
+- The sidecar is stored as per-slot rows in `analytics.sqlite` (see
+  `storage.md`); a slot is rewritten only when its content hash changes.
+  Session DTOs are evicted LRU-oldest first to keep the serialized
+  presentation under 4 MiB. Home/Project are preserved even if they alone
+  exceed the budget. (The JSON sidecar of earlier builds also capped itself at
+  the compact snapshot size and omitted sessions when that snapshot was
+  absent; it is migrated once and then removed.)
 - The sidecar records its save time, last-refresh frontier, and coverage. A
   same-source sidecar older than the compact index is not reattached; a newer
   index wins. A newer sidecar may still serve its DTOs, but wall-time alone is

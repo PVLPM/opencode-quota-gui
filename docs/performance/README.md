@@ -119,6 +119,34 @@ Useful environment overrides:
   (`rows = sessions * steps`).
 - `OCQ_BENCH_TMP_DIR` — benchmark temp parent (default `<tmp>/opencode`).
 
+## Comparing two builds
+
+The suite measures whichever build `--dist-root <dir>` points at (a directory
+containing `dist/`), so one suite version can measure a baseline copy and a
+candidate identically. Persistence metrics are storage-agnostic: the
+footprint counts the JSON index and sidecar, or `analytics.sqlite` with its
+WAL/SHM (see `storage.md`). Each delta scenario also reports `writeBytes`, the
+process write volume from the refresh until queued persistence settles
+(Windows `WriteTransferCount`, Linux `/proc/self/io`; `null` elsewhere). It
+covers every file the process writes, so it is an upper bound for persistence.
+
+```sh
+# Keep a baseline build outside dist/ (ignored), then build the candidate.
+git worktree add ../baseline <baseline-sha>   # or copy its dist/
+node scripts/benchmark-analytics.mjs --dist-root ../baseline --label baseline
+
+# Alternating A/B/B/A runs with min/p50/p90/max per metric.
+node scripts/benchmark-analytics-ab.mjs --a ../baseline --b . --runs 5 \
+  --runtime bun --out docs/performance/local/runs/ab -- --profile all
+```
+
+Both builds price with their own bundled `dist/data` snapshot because the
+suite isolates every XDG directory. Check that the two snapshots are
+byte-identical before comparing costs. OpenCode runs the dashboard and its
+analytics worker in Bun, so prefer `--runtime bun` for decisions and use Node
+for cross-checks. On Windows, set `BUN_BINARY` to the real `bun.exe`, because
+an npm `bun.cmd` shim cannot be spawned without a shell.
+
 ## Query-plan diagnostic
 
 `scripts/analytics-query-plan.mjs` opens OpenCode's database read-only and prints
