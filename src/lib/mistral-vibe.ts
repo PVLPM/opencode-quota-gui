@@ -17,8 +17,7 @@
  */
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
-import { fetchWithTimeout } from "./http.js";
-import { scrubCredentialErrorText } from "./opencode-auth.js";
+import { fetchWithTimeout, RequestTimeoutError } from "./http.js";
 
 export const MISTRAL_VIBE_API_BASE_URL = "https://api.mistral.ai";
 export const MISTRAL_VIBE_BUDGET_URL = `${MISTRAL_VIBE_API_BASE_URL}/v1/billing/budget`;
@@ -33,11 +32,36 @@ export const MISTRAL_VIBE_REQUEST_TIMEOUT_MS = 3_000;
 /** Highest accepted plan label length, so an unexpected body cannot flood a card. */
 const PLAN_LABEL_MAX_LENGTH = 32;
 
+/**
+ * Longest value that can still be one credential. A real platform key is far
+ * shorter; the bound only stops an arbitrary blob from becoming a header.
+ */
+const API_KEY_MAX_LENGTH = 512;
+
+/** A redirect off the documented endpoint is refused, never followed. */
+const REDIRECT_ERROR_RE = /redirect/iu;
+
 const USER_AGENT = "opencode-quota-gui/1.0";
 
 /** Credential kinds for the exact 401 reply. */
 export const MISTRAL_VIBE_UNAUTHORIZED_MESSAGE =
   "Mistral rejected this credential (HTTP 401). Update MISTRAL_API_KEY.";
+
+export const MISTRAL_VIBE_INVALID_KEY_MESSAGE =
+  "Mistral API key format is invalid: a key is printable ASCII with no spaces or control characters.";
+
+/**
+ * Fixed transport messages.
+ *
+ * An exception message is never forwarded: Node's header validation quotes the
+ * rejected header value, and a transport error can quote the request URL or an
+ * account detail. Each failure class maps to one stable message instead.
+ */
+export const MISTRAL_VIBE_TIMEOUT_MESSAGE = "Mistral request timed out.";
+export const MISTRAL_VIBE_NETWORK_ERROR_MESSAGE = "Mistral request failed (network error).";
+export const MISTRAL_VIBE_INVALID_RESPONSE_MESSAGE = "Mistral returned an invalid response.";
+export const MISTRAL_VIBE_REDIRECT_MESSAGE =
+  "Mistral billing endpoint redirected; the request was not followed.";
 
 /**
  * The platform's exact authorization error: reading organisation inference
@@ -116,6 +140,18 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+/**
+ * Whether this value can be sent as the bearer credential.
+ *
+ * Only printable, non-whitespace ASCII of a sane length is accepted. A value with
+ * a newline or control character is rejected by Node's header validation, whose
+ * error quotes the rejected value, so an unusable key is refused before the
+ * `Authorization` header is built and before any request exists.
+ */
+export function isWellFormedMistralVibeApiKey(apiKey: string): boolean {
+  return apiKey.length <= API_KEY_MAX_LENGTH && /^[\x21-\x7e]+$/u.test(apiKey);
+}
+
 /** Normalize a reported timestamp to ISO-8601, or drop it when it is unparsable. */
 function isoOrUndefined(value: unknown): string | undefined {
   const raw = nonEmptyString(value);
@@ -169,6 +205,9 @@ async function getJson(params: {
   return await fetchWithTimeout(params.url, {
     request: {
       method: "GET",
+      // The billing read has one documented destination; a redirect would send
+      // the credential somewhere else, so it is an error rather than a follow.
+      redirect: "error",
       headers: {
         Authorization: `Bearer ${params.apiKey}`,
         Accept: "application/json",
@@ -231,6 +270,53 @@ function budgetFailure(response: Exclude<JsonResponse, { ok: true }>): MistralVi
 }
 
 /**
+ * The exact failure for one unusable credential value.
+ *
+ * `failureCategory: "credentials"` keeps it a credential problem rather than a
+ * transient transport problem, so the account is not retried unchanged.
+ */
+function invalidKeyFailure(): MistralVibeQuotaResult {
+  return {
+    success: false,
+    error: MISTRAL_VIBE_INVALID_KEY_MESSAGE,
+    failureCategory: "credentials",
+  };
+}
+
+/**
+ * Classify one thrown request into a fixed transport failure.
+ *
+ * Nothing from the exception is forwarded: only its class selects the message.
+ */
+function transportFailure(error: unknown): MistralVibeQuotaResult {
+  if (
+    error instanceof RequestTimeoutError ||
+    (error instanceof Error && error.name === "AbortError")
+  ) {
+    return { success: false, error: MISTRAL_VIBE_TIMEOUT_MESSAGE, failureCategory: "provider_api" };
+  }
+  if (error instanceof Error && REDIRECT_ERROR_RE.test(error.message)) {
+    return {
+      success: false,
+      error: MISTRAL_VIBE_REDIRECT_MESSAGE,
+      failureCategory: "provider_api",
+    };
+  }
+  if (error instanceof SyntaxError) {
+    return {
+      success: false,
+      error: MISTRAL_VIBE_INVALID_RESPONSE_MESSAGE,
+      failureCategory: "provider_api",
+    };
+  }
+  return {
+    success: false,
+    error: MISTRAL_VIBE_NETWORK_ERROR_MESSAGE,
+    failureCategory: "provider_api",
+  };
+}
+
+/**
  * Read the Vibe budget and plan for one credential.
  *
  * The budget read is the quota source: when it fails the account reports that
@@ -242,6 +328,8 @@ export async function queryMistralVibeQuota(params: {
   requestTimeoutMs?: number;
   fetchFn?: typeof fetch;
 }): Promise<MistralVibeQuotaResult> {
+  if (!isWellFormedMistralVibeApiKey(params.apiKey)) return invalidKeyFailure();
+
   const observedAtMs = Date.now();
   const timeoutMs = params.requestTimeoutMs ?? MISTRAL_VIBE_REQUEST_TIMEOUT_MS;
 
@@ -255,13 +343,7 @@ export async function queryMistralVibeQuota(params: {
       ),
     ]);
   } catch (error) {
-    return {
-      success: false,
-      error: scrubCredentialErrorText(
-        error instanceof Error ? error.message : "Mistral request failed",
-      ),
-      failureCategory: "provider_api",
-    };
+    return transportFailure(error);
   }
 
   if (!budget.ok) return budgetFailure(budget);

@@ -117,6 +117,8 @@ export const antigravityCliProvider: QuotaProvider = {
           statusDetails,
         );
       case "error":
+        // `result.message` comes from the reader's fixed message table: the CLI's
+        // own stdout, stderr and JSON error text never reach this result.
         return withStatusDetails(
           attemptedErrorResult(ANTIGRAVITY_CLI_LABEL, result.message, {
             ...(result.failureCategory !== undefined

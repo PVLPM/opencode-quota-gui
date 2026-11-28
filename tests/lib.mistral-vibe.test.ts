@@ -3,13 +3,19 @@
  *
  * Every request is served by an injected fetch: no test reaches api.mistral.ai.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  isWellFormedMistralVibeApiKey,
   MISTRAL_VIBE_BILLING_UNAVAILABLE_MESSAGE,
   MISTRAL_VIBE_BUDGET_URL,
   MISTRAL_VIBE_FORBIDDEN_MESSAGE,
+  MISTRAL_VIBE_INVALID_KEY_MESSAGE,
+  MISTRAL_VIBE_INVALID_RESPONSE_MESSAGE,
+  MISTRAL_VIBE_NETWORK_ERROR_MESSAGE,
+  MISTRAL_VIBE_REDIRECT_MESSAGE,
   MISTRAL_VIBE_SUBSCRIPTION_URL,
+  MISTRAL_VIBE_TIMEOUT_MESSAGE,
   MISTRAL_VIBE_UNAUTHORIZED_MESSAGE,
   parseMistralVibeBudget,
   parseMistralVibeSubscription,
@@ -55,7 +61,12 @@ function fetchStub(routes: {
   budget: RouteResult | (() => Promise<Response>);
   subscription?: RouteResult | (() => Promise<Response>);
 }) {
-  const calls: Array<{ url: string; authorization: string | null; accept: string | null }> = [];
+  const calls: Array<{
+    url: string;
+    authorization: string | null;
+    accept: string | null;
+    redirect: RequestInit["redirect"];
+  }> = [];
   const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const headers = new Headers(init?.headers);
@@ -63,6 +74,7 @@ function fetchStub(routes: {
       url,
       authorization: headers.get("authorization"),
       accept: headers.get("accept"),
+      redirect: init?.redirect,
     });
     const route = url === MISTRAL_VIBE_BUDGET_URL ? routes.budget : routes.subscription;
     if (route === undefined) throw new Error("unexpected subscription request");
@@ -240,9 +252,98 @@ describe("Mistral Vibe auth and error mapping", () => {
 
     expect(result.success).toBe(false);
     if (result.success) return;
-    expect(result.error).toContain("Request timeout");
+    expect(result.error).toBe(MISTRAL_VIBE_TIMEOUT_MESSAGE);
     expect(result.error).not.toContain(API_KEY);
     expect(result.failureCategory).toBe("provider_api");
+  });
+
+  it("pins both billing reads with redirect: error", async () => {
+    const { fetchFn, calls } = fetchStub({
+      budget: { status: 200, body: { vibe_budget: VIBE_BUDGET } },
+      subscription: { status: 200, body: SUBSCRIPTION },
+    });
+
+    await queryMistralVibeQuota({ apiKey: API_KEY, fetchFn });
+
+    expect(calls).toHaveLength(2);
+    for (const call of calls) expect(call.redirect).toBe("error");
+  });
+
+  it("maps a refused redirect to a fixed message", async () => {
+    const fetchFn = (async () => {
+      throw new TypeError("unexpected redirect");
+    }) as typeof fetch;
+
+    const result = await queryMistralVibeQuota({ apiKey: API_KEY, fetchFn });
+
+    expect(result).toEqual({
+      success: false,
+      error: MISTRAL_VIBE_REDIRECT_MESSAGE,
+      failureCategory: "provider_api",
+    });
+  });
+
+  it("maps a thrown transport error to a fixed message that never quotes the key", async () => {
+    const fetchFn = (async () => {
+      throw new TypeError(`fetch failed: header value ${API_KEY} rejected`);
+    }) as typeof fetch;
+
+    const result = await queryMistralVibeQuota({ apiKey: API_KEY, fetchFn });
+
+    expect(result).toEqual({
+      success: false,
+      error: MISTRAL_VIBE_NETWORK_ERROR_MESSAGE,
+      failureCategory: "provider_api",
+    });
+    if (result.success) return;
+    expect(result.error).not.toContain(API_KEY);
+  });
+
+  it("maps an unreadable response to a fixed invalid-response message", async () => {
+    const fetchFn = (async () => {
+      throw new SyntaxError(`Unexpected token < in JSON for ${API_KEY}`);
+    }) as typeof fetch;
+
+    const result = await queryMistralVibeQuota({ apiKey: API_KEY, fetchFn });
+
+    expect(result).toEqual({
+      success: false,
+      error: MISTRAL_VIBE_INVALID_RESPONSE_MESSAGE,
+      failureCategory: "provider_api",
+    });
+  });
+});
+
+describe("Mistral Vibe credential syntax", () => {
+  it("accepts only printable non-whitespace ASCII of a sane length", () => {
+    expect(isWellFormedMistralVibeApiKey(API_KEY)).toBe(true);
+    expect(isWellFormedMistralVibeApiKey("a")).toBe(true);
+    expect(isWellFormedMistralVibeApiKey("")).toBe(false);
+    expect(isWellFormedMistralVibeApiKey("key with space")).toBe(false);
+    expect(isWellFormedMistralVibeApiKey("key\twith\ttab")).toBe(false);
+    expect(isWellFormedMistralVibeApiKey("key\nwith\nnewline")).toBe(false);
+    expect(isWellFormedMistralVibeApiKey(`key${String.fromCharCode(7)}bell`)).toBe(false);
+    expect(isWellFormedMistralVibeApiKey("clé")).toBe(false);
+    expect(isWellFormedMistralVibeApiKey("k".repeat(513))).toBe(false);
+  });
+
+  it("refuses an unusable key before any request exists", async () => {
+    const fetchFn = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>();
+
+    for (const key of [`sk-mistral${String.fromCharCode(10)}X-Injected: 1`, "sk-mistral key", ""]) {
+      const result = await queryMistralVibeQuota({ apiKey: key, fetchFn });
+
+      expect(result).toEqual({
+        success: false,
+        error: MISTRAL_VIBE_INVALID_KEY_MESSAGE,
+        failureCategory: "credentials",
+      });
+      expect(fetchFn).not.toHaveBeenCalled();
+      if (result.success) continue;
+      expect(result.error).not.toContain("sk-mistral");
+      expect(result.error).not.toContain("X-Injected");
+    }
+    expect(MISTRAL_VIBE_INVALID_KEY_MESSAGE).toContain("invalid");
   });
 });
 
