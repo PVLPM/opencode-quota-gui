@@ -192,7 +192,8 @@ function aligned(
 
 function build(db: UsageStore | undefined, overrides: Partial<UsageSnapshotBuilderOptions> = {}) {
   return createUsageSnapshotBuilder({
-    ...(db !== undefined ? { store: db } : {}),
+    // Without a store, point at a missing temp file: never the real private history.
+    ...(db !== undefined ? { store: db } : { path: join(root, "absent-usage-history.sqlite") }),
     now: () => at(240),
     timeZone: "UTC",
     ...overrides,
