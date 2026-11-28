@@ -29,6 +29,25 @@ interface SqliteStatement {
   get(...params: unknown[]): unknown;
   run(...params: unknown[]): unknown;
   iterate(...params: unknown[]): IterableIterator<unknown>;
+  /**
+   * bun:sqlite only. An unfinalized statement keeps the database handle (and,
+   * on Windows, the file) open after `close()`; node:sqlite finalizes on close.
+   */
+  finalize?(): void;
+}
+
+/** Runs one statement and releases it, so `close()` really releases the file. */
+function withStatement<T>(
+  db: NodeSqliteDatabase | BunSqliteDatabase,
+  sql: string,
+  use: (stmt: SqliteStatement) => T,
+): T {
+  const stmt = db.prepare(sql);
+  try {
+    return use(stmt);
+  } finally {
+    stmt.finalize?.();
+  }
 }
 
 interface BunSqliteDatabase {
@@ -81,13 +100,11 @@ function runNodePragma(db: NodeSqliteDatabase, sql: string): void {
 function createConn(db: NodeSqliteDatabase | BunSqliteDatabase): SqliteConn {
   return {
     all<T = unknown>(sql: string, params?: unknown[]): T[] {
-      const stmt = db.prepare(sql);
-      return stmt.all(...toParams(params)) as T[];
+      return withStatement(db, sql, (stmt) => stmt.all(...toParams(params)) as T[]);
     },
 
     get<T = unknown>(sql: string, params?: unknown[]): T | null {
-      const stmt = db.prepare(sql);
-      const row = stmt.get(...toParams(params)) as T | undefined;
+      const row = withStatement(db, sql, (stmt) => stmt.get(...toParams(params))) as T | undefined;
       return row ?? null;
     },
 
@@ -182,15 +199,18 @@ function configureWritableDb(
 }
 
 function writableConn(db: NodeSqliteDatabase | BunSqliteDatabase): WritableSqliteConn {
+  const base = createConn(db);
+  const prepared = new Set<SqliteStatement>();
   return {
-    ...createConn(db),
+    ...base,
 
     run(sql: string, params?: unknown[]): void {
-      db.prepare(sql).run(...toParams(params));
+      withStatement(db, sql, (stmt) => stmt.run(...toParams(params)));
     },
 
     prepare(sql: string): PreparedSqliteStatement {
       const stmt = db.prepare(sql);
+      prepared.add(stmt);
       return {
         all<T = unknown>(params?: unknown[]): T[] {
           return stmt.all(...toParams(params)) as T[];
@@ -205,6 +225,18 @@ function writableConn(db: NodeSqliteDatabase | BunSqliteDatabase): WritableSqlit
           stmt.run(...toParams(params));
         },
       };
+    },
+
+    close(): void {
+      for (const stmt of prepared) {
+        try {
+          stmt.finalize?.();
+        } catch {
+          // closing must still release the handle
+        }
+      }
+      prepared.clear();
+      base.close();
     },
   };
 }
