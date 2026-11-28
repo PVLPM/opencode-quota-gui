@@ -18,6 +18,8 @@ export function placeChartTooltip(input: {
   bounds: TooltipRect;
   tooltip: { width: number; height: number };
   anchor: number;
+  /** Optional vertical point in chart pixels; absent centers on the scroller. */
+  anchorY?: number;
   /** Optional clearance from the active mark; defaults to a small gap. */
   gap?: number;
 }) {
@@ -40,7 +42,10 @@ export function placeChartTooltip(input: {
     clipLeft + inset,
     Math.max(clipLeft + inset, clipRight - inset - width),
   );
-  const preferredTop = clipTop + (clipBottom - clipTop - height) / 2;
+  const preferredTop =
+    input.anchorY === undefined
+      ? clipTop + (clipBottom - clipTop - height) / 2
+      : chart.top + input.anchorY - height / 2;
   const top = clamp(
     preferredTop,
     clipTop + inset,
@@ -58,7 +63,38 @@ export function placeChartTooltip(input: {
   };
 }
 
-export function createChartTooltipLayout(anchor: () => number, gap?: () => number) {
+export function chartTooltipStyle(
+  position: {
+    left: number;
+    top: number;
+    maxWidth: number;
+    maxHeight: number;
+    visible: boolean;
+  },
+  options: { minWidth?: number } = {},
+): {
+  left: string;
+  top: string;
+  "min-width": string;
+  "max-width": string;
+  "max-height": string;
+  visibility: "visible" | "hidden";
+} {
+  return {
+    left: `${position.left}px`,
+    top: `${position.top}px`,
+    "min-width": `min(${options.minWidth ?? 280}px, ${position.maxWidth}px)`,
+    "max-width": `${position.maxWidth}px`,
+    "max-height": `${position.maxHeight}px`,
+    visibility: position.visible ? "visible" : "hidden",
+  };
+}
+
+export function createChartTooltipLayout(
+  anchor: () => number,
+  gap?: () => number,
+  anchorY?: () => number,
+) {
   const [position, setPosition] = createSignal({
     left: 0,
     top: 0,
@@ -92,6 +128,7 @@ export function createChartTooltipLayout(anchor: () => number, gap?: () => numbe
         bounds: { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) },
         tooltip: { width: tooltip.offsetWidth, height: tooltip.offsetHeight },
         anchor: anchor(),
+        ...(anchorY === undefined ? {} : { anchorY: anchorY() }),
         gap: gap?.(),
       }),
     );
@@ -99,6 +136,7 @@ export function createChartTooltipLayout(anchor: () => number, gap?: () => numbe
 
   createEffect(() => {
     anchor();
+    anchorY?.();
     update();
   });
   onMount(() => {

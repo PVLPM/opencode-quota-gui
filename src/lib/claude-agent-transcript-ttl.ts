@@ -3,6 +3,7 @@ import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseClaudeConfigDirectoryCandidate } from "./anthropic.js";
+import { parseTranscriptTail } from "./claude-transcript-usage.js";
 
 /**
  * Observed-retention reader for one Claude Agent invocation. It stats/reads exactly one
@@ -12,14 +13,7 @@ import { parseClaudeConfigDirectoryCandidate } from "./anthropic.js";
 
 export type ClaudeObservedTtlResult = "1h" | "unchanged" | "retry";
 
-/** Numeric counters of one grouped API message; nothing else leaves the parser. */
-export interface TranscriptUsage {
-  input?: number;
-  read?: number;
-  write?: number;
-  oneHour?: number;
-  fiveMinute?: number;
-}
+export { parseTranscriptTail, type TranscriptUsage } from "./claude-transcript-usage.js";
 
 export interface ClaudeTranscriptQuery {
   /** The OpenCode session directory the SDK ran in (its `cwd`). */
@@ -44,6 +38,24 @@ const TAIL_BYTES = 256 * 1024;
  */
 const MAX_ENCODED_DIRECTORY_LENGTH = 200;
 
+/**
+ * The config directory named by `CLAUDE_CONFIG_DIR`, or the default `~/.claude`.
+ * A present-but-invalid override (relative, padded, empty, UNC/network) is unresolved so
+ * callers fail closed instead of reading another directory.
+ */
+export function resolveClaudeConfigDirectory(
+  query: Pick<ClaudeTranscriptQuery, "env" | "home">,
+): string | undefined {
+  const env = query.env ?? process.env;
+  if (env.CLAUDE_CONFIG_DIR !== undefined && /^(?:\\\\|\/\/)/.test(env.CLAUDE_CONFIG_DIR))
+    return undefined;
+  const configured = parseClaudeConfigDirectoryCandidate(env.CLAUDE_CONFIG_DIR);
+  if (configured === null || (configured !== undefined && /^(?:\\\\|\/\/)/.test(configured))) {
+    return undefined;
+  }
+  return configured ?? join(query.home ?? homedir(), ".claude");
+}
+
 /** The single candidate transcript path, or undefined when it cannot be computed safely. */
 export function claudeTranscriptPath(
   query: Pick<ClaudeTranscriptQuery, "directory" | "nativeSessionId" | "env" | "home">,
@@ -51,84 +63,9 @@ export function claudeTranscriptPath(
   if (!UUID_PATTERN.test(query.nativeSessionId) || query.directory.length === 0) return undefined;
   const encoded = query.directory.replace(/[^a-zA-Z0-9]/g, "-");
   if (encoded.length > MAX_ENCODED_DIRECTORY_LENGTH) return undefined;
-  const env = query.env ?? process.env;
-  // Fail closed on a present-but-invalid override (relative, padded, empty) instead of
-  // reading another directory; UNC/network paths are never read either.
-  if (env.CLAUDE_CONFIG_DIR !== undefined && /^(?:\\\\|\/\/)/.test(env.CLAUDE_CONFIG_DIR))
-    return undefined;
-  const configured = parseClaudeConfigDirectoryCandidate(env.CLAUDE_CONFIG_DIR);
-  if (configured === null || (configured !== undefined && /^(?:\\\\|\/\/)/.test(configured))) {
-    return undefined;
-  }
-  const configDir = configured ?? join(query.home ?? homedir(), ".claude");
+  const configDir = resolveClaudeConfigDirectory(query);
+  if (configDir === undefined) return undefined;
   return join(configDir, "projects", encoded, `${query.nativeSessionId}.jsonl`);
-}
-
-const counter = (value: unknown): number | undefined =>
-  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
-
-const maxOf = (a: number | undefined, b: number | undefined): number | undefined =>
-  a === undefined ? b : b === undefined ? a : Math.max(a, b);
-
-/**
- * Groups assistant records by `message.id` (records repeat it per content block; the max of
- * each counter wins) and returns the group of the record whose `uuid` matches. Only text up
- * to the last newline is parsed, so a partially flushed trailing line is ignored.
- */
-export function parseTranscriptTail(text: string, uuid: string): TranscriptUsage | undefined {
-  const complete = text.slice(0, text.lastIndexOf("\n") + 1);
-  const groups = new Map<string, Record<keyof TranscriptUsage, number | undefined>>();
-  let target: string | undefined;
-  for (const line of complete.split("\n")) {
-    if (line.length === 0) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (typeof parsed !== "object" || parsed === null) continue;
-    const entry = parsed as { type?: unknown; uuid?: unknown; message?: unknown };
-    if (entry.type !== "assistant" || typeof entry.message !== "object" || entry.message === null) {
-      continue;
-    }
-    const message = entry.message as { id?: unknown; usage?: unknown };
-    if (
-      typeof message.id !== "string" ||
-      typeof message.usage !== "object" ||
-      message.usage === null
-    ) {
-      continue;
-    }
-    if (entry.uuid === uuid) target = message.id;
-    const usage = message.usage as Record<string, unknown>;
-    const split =
-      typeof usage.cache_creation === "object" && usage.cache_creation !== null
-        ? (usage.cache_creation as Record<string, unknown>)
-        : {};
-    const group = groups.get(message.id) ?? {
-      input: undefined,
-      read: undefined,
-      write: undefined,
-      oneHour: undefined,
-      fiveMinute: undefined,
-    };
-    group.input = maxOf(group.input, counter(usage.input_tokens));
-    group.read = maxOf(group.read, counter(usage.cache_read_input_tokens));
-    group.write = maxOf(group.write, counter(usage.cache_creation_input_tokens));
-    group.oneHour = maxOf(group.oneHour, counter(split.ephemeral_1h_input_tokens));
-    group.fiveMinute = maxOf(group.fiveMinute, counter(split.ephemeral_5m_input_tokens));
-    groups.set(message.id, group);
-  }
-  const group = target === undefined ? undefined : groups.get(target);
-  if (group === undefined) return undefined;
-  return {
-    ...(group.input === undefined ? {} : { input: group.input }),
-    ...(group.read === undefined ? {} : { read: group.read }),
-    ...(group.write === undefined ? {} : { write: group.write }),
-    ...(group.oneHour === undefined ? {} : { oneHour: group.oneHour }),
-    ...(group.fiveMinute === undefined ? {} : { fiveMinute: group.fiveMinute }),
-  };
 }
 
 /** Tail text; undefined when unreadable or absent (maybe not flushed yet); null for a non-regular file. */

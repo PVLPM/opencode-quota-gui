@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { buildSyntheticUsageSnapshot } from "../scripts/fixtures/synthetic-usage.mjs";
 import { orderCardsByPreference } from "../src/contracts/card-order";
 import type {
   HomeSnapshot,
@@ -2718,6 +2719,8 @@ describe("settings page", () => {
         "lowQuotaThresholdRemainingPercent",
         "minIntervalMs",
         "nativeQuotaNotifications",
+        "usageImport.claudeCode",
+        "usageImport.codex",
         "opencodeGoWindows",
         "opencodeMonthlyLimit",
         "percentDisplayMode",
@@ -2825,6 +2828,7 @@ describe("settings page", () => {
       "display",
       "temporal",
       "advanced",
+      "usage-import",
       "visibility",
       "dashboard",
     ]);
@@ -4316,7 +4320,10 @@ describe("range transitions name the range still on screen", () => {
 
   interface AppHarness {
     root: TestNode;
+    /** The page's location, so a reload can re-mount against the same URL. */
+    browser: ReturnType<typeof historyBrowser>;
     navigate: (path: string) => Promise<void>;
+    path: () => string;
     text: () => string;
     notice: () => TestNode | undefined;
     mainLink: (href: string) => TestNode | undefined;
@@ -4330,15 +4337,18 @@ describe("range transitions name the range still on screen", () => {
    */
   function mountApp(options: {
     path: string;
+    /** Reused across a simulated reload: the page keeps its URL and storage. */
+    browser?: ReturnType<typeof historyBrowser>;
     home?: DashboardClient["home"];
     groups?: DashboardClient["groups"];
     project?: DashboardClient["project"];
     health?: DashboardClient["health"];
     quota?: DashboardClient["quota"];
     settings?: DashboardClient["settings"];
+    usage?: DashboardClient["usage"];
     subscribe?: DashboardClient["subscribe"];
   }): AppHarness {
-    const browser = historyBrowser(options.path);
+    const browser = options.browser ?? historyBrowser(options.path);
     vi.stubGlobal("window", browser);
 
     const client: DashboardClient = {
@@ -4364,6 +4374,8 @@ describe("range transitions name the range still on screen", () => {
           stale: false,
         })),
       quota: options.quota ?? (async () => homeSnapshot()),
+      usage:
+        options.usage ?? (async ({ range }) => buildSyntheticUsageSnapshot({ range, nowMs: NOW })),
       project: options.project ?? (async () => projectSnapshot()),
       session: async () => sessionSnapshot(),
       settings: options.settings ?? (async () => settingsSnapshot()),
@@ -4382,10 +4394,12 @@ describe("range transitions name the range still on screen", () => {
     const stop = renderGraph.mount(() => renderGraph.app({ client }), root);
     return {
       root,
+      browser,
       navigate: async (path) => {
         browser.follow(path);
         await settle();
       },
+      path: () => browser.location.pathname + browser.location.search,
       text: () => renderGraph.textOf(root),
       notice: () =>
         [
@@ -4403,6 +4417,95 @@ describe("range transitions name the range still on screen", () => {
       },
     };
   }
+
+  it("keeps the Usage tab and route when a quota observation update arrives", async () => {
+    let onEvent: Parameters<DashboardClient["subscribe"]>[0] | undefined;
+    let usageReads = 0;
+    const app = mountApp({
+      path: "/usage?range=7d",
+      subscribe: (callback) => {
+        onEvent = callback;
+        return () => {
+          onEvent = undefined;
+        };
+      },
+      usage: async ({ range }) => {
+        usageReads += 1;
+        return buildSyntheticUsageSnapshot({ range, nowMs: NOW });
+      },
+      quota: async () => homeSnapshot(),
+    });
+    const activeUsage = () =>
+      renderGraph
+        .elementsNamed(app.root, "a")
+        .find(
+          (node) =>
+            node.props["aria-current"] === "page" &&
+            String(node.props.href ?? "").startsWith("/usage"),
+        );
+
+    try {
+      await settle();
+      expect(app.path()).toBe("/usage?range=7d");
+      expect(app.text()).toContain("5h limit");
+      expect(activeUsage()).toBeDefined();
+      const readsBefore = usageReads;
+
+      onEvent?.({ topic: "quota.changed", at: NOW });
+      await settle();
+
+      // The update re-reads Usage history but must not reset the route, the
+      // tab, or the selected Usage range.
+      expect(app.path()).toBe("/usage?range=7d");
+      expect(app.text()).toContain("5h limit");
+      expect(activeUsage()).toBeDefined();
+      expect(usageReads).toBeGreaterThan(readsBefore);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("reopens the Usage tab after a reload instead of falling back to Quota", async () => {
+    const activeTab = (root: TestNode): string | undefined => {
+      const nav = renderGraph
+        .elementsNamed(root, "nav")
+        .find((node) => String(node.props.class ?? "").includes("qg-analytics-tabs"));
+      if (nav === undefined) return undefined;
+      const link = renderGraph
+        .elementsNamed(nav, "a")
+        .find((node) => node.props["aria-current"] === "page");
+      return link === undefined ? undefined : String(link.props.href);
+    };
+
+    const before = mountApp({ path: "/quota" });
+    let page: ReturnType<typeof historyBrowser>;
+    try {
+      await settle();
+      expect(activeTab(before.root)).toBe("/quota");
+      await before.navigate("/usage?range=lifetime");
+      expect(before.path()).toBe("/usage?range=lifetime");
+      expect(activeTab(before.root)).toBe("/usage?range=lifetime");
+      page = before.browser;
+    } finally {
+      before.dispose();
+    }
+
+    // A reload keeps the page's URL and mounts a brand-new shell against it.
+    const reloaded = mountApp({
+      path: page.location.pathname + page.location.search,
+      browser: page,
+    });
+    try {
+      await settle();
+
+      // The selected tab is derived from the location, never reset to Quota.
+      expect(reloaded.path()).toBe("/usage?range=lifetime");
+      expect(activeTab(reloaded.root)).toBe("/usage?range=lifetime");
+      expect(reloaded.text()).toContain("5h limit");
+    } finally {
+      reloaded.dispose();
+    }
+  });
 
   it("blocks an older server contract before treating its payload as ready", async () => {
     const app = mountApp({
@@ -5674,6 +5777,47 @@ describe("the settings editor keeps its draft across refetches", () => {
       enabled: false,
       modelChangeToastEnabled: false,
     });
+    mounted.dispose();
+  });
+
+  it("renders usage history import off by default and saves the toggled patch", async () => {
+    const base = settingsSnapshot();
+    const mounted = mountSettings({
+      initial: settingsSnapshot({
+        values: {
+          ...base.values,
+          "usageImport.claudeCode": false,
+          "usageImport.codex": false,
+        },
+        writable: [...base.writable, "usageImport.claudeCode", "usageImport.codex"],
+      }),
+    });
+    const usageSwitch = (label: string): TestNode => {
+      const control = findNode(
+        renderGraph.elementsNamed(mounted.root, "div"),
+        (node) =>
+          node.props["data-component"] === "switch" && renderGraph.textOf(node).includes(label),
+        `switch ${label}`,
+      );
+      return findNode(
+        renderGraph.elementsNamed(control, "input"),
+        () => true,
+        `switch input ${label}`,
+      );
+    };
+
+    expect(usageSwitch("Claude Code").props.checked).toBe(false);
+    expect(usageSwitch("Codex").props.checked).toBe(false);
+
+    fire(usageSwitch("Claude Code"), "onChange", {
+      target: { checked: true },
+      stopPropagation: () => {},
+    });
+    await settle();
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "the usage import save");
+    expect(mounted.saves[0]?.patch).toEqual({ "usageImport.claudeCode": true });
+    expect(mounted.saves[0]?.expectedRevision).toBe("revision-1");
     mounted.dispose();
   });
 

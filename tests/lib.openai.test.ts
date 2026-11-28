@@ -338,6 +338,7 @@ describe("openai auth resolution", () => {
       monthly: {
         percentRemaining: 67,
         resetTimeIso: new Date(1_786_262_548_000).toISOString(),
+        resetPrecision: "exact",
       },
     });
   });
@@ -352,6 +353,7 @@ describe("openai auth resolution", () => {
       monthly: {
         percentRemaining: 100,
         resetTimeIso: new Date(1_785_542_400_000).toISOString(),
+        resetPrecision: "exact",
       },
     });
   });
@@ -372,6 +374,7 @@ describe("openai auth resolution", () => {
     expect(out && out.success ? out.windows.monthly : undefined).toEqual({
       percentRemaining: 80,
       resetTimeIso: "2026-01-01T00:01:00.000Z",
+      resetPrecision: "estimated",
     });
   });
 
@@ -438,6 +441,7 @@ describe("openai auth resolution", () => {
       hourly: {
         percentRemaining: 80,
         resetTimeIso: "2026-01-01T01:00:00.000Z",
+        resetPrecision: "estimated",
         fixedWindow: {
           kind: "fixed_window",
           startedAtIso: "2025-12-31T20:00:00.000Z",
@@ -449,6 +453,7 @@ describe("openai auth resolution", () => {
       codeReview: {
         percentRemaining: 95,
         resetTimeIso: "2026-01-01T00:01:00.000Z",
+        resetPrecision: "estimated",
       },
     });
     expect(out && out.success ? out.credits : undefined).toEqual({
@@ -476,6 +481,7 @@ describe("openai auth resolution", () => {
       monthly: {
         percentRemaining: 67,
         resetTimeIso: new Date(1_786_262_548_000).toISOString(),
+        resetPrecision: "exact",
       },
     });
   });
@@ -592,6 +598,7 @@ describe("openai auth resolution", () => {
       weekly: {
         percentRemaining: 30,
         resetTimeIso: "2026-01-08T00:00:00.000Z",
+        resetPrecision: "estimated",
       },
     });
   });
@@ -632,6 +639,7 @@ describe("openai auth resolution", () => {
       hourly: {
         percentRemaining: 75,
         resetTimeIso: "2026-01-01T05:00:00.000Z",
+        resetPrecision: "estimated",
       },
     });
   });
@@ -672,6 +680,7 @@ describe("openai auth resolution", () => {
       weekly: {
         percentRemaining: 90,
         resetTimeIso: "2026-01-15T00:00:00.000Z",
+        resetPrecision: "exact",
       },
     });
   });
@@ -718,6 +727,7 @@ describe("openai auth resolution", () => {
       codeReview: {
         percentRemaining: 95,
         resetTimeIso: "2026-01-01T00:01:00.000Z",
+        resetPrecision: "estimated",
       },
     });
   });
@@ -759,6 +769,7 @@ describe("openai auth resolution", () => {
       hourly: {
         percentRemaining: 80,
         resetTimeIso: "2026-01-01T01:00:00.000Z",
+        resetPrecision: "estimated",
         fixedWindow: {
           kind: "fixed_window",
           startedAtIso: "2025-12-31T20:00:00.000Z",
@@ -769,7 +780,6 @@ describe("openai auth resolution", () => {
       },
       weekly: {
         percentRemaining: 30,
-        resetTimeIso: undefined,
       },
     });
   });

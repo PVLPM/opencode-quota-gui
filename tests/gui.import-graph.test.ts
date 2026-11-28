@@ -76,6 +76,7 @@ describe("contract layer import rules", () => {
       "src/contracts/dto-guards.ts",
       "src/contracts/guards.ts",
       "src/contracts/identity.ts",
+      "src/contracts/mistral-vibe-quota.ts",
       "src/contracts/openai-quota.ts",
       "src/contracts/provider-auto-resume.ts",
       "src/contracts/provider-failure.ts",
@@ -85,6 +86,8 @@ describe("contract layer import rules", () => {
       "src/contracts/settings.ts",
       "src/contracts/temporal.ts",
       "src/contracts/time-zone.ts",
+      "src/contracts/usage-activity.ts",
+      "src/contracts/usage.ts",
     ]);
   });
 

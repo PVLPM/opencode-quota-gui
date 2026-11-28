@@ -1,15 +1,118 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { HomeSnapshot } from "../src/contracts/dashboard.js";
+import type { CostedTokens, HomeSnapshot } from "../src/contracts/dashboard.js";
 import type { RangeKey } from "../src/contracts/ranges.js";
+import type { UsageActivityEntry, UsageActivityQuery } from "../src/contracts/usage-activity.js";
 import type { AnalyticsTransport } from "../src/gui/analytics-protocol.js";
 import { createAnalyticsReadService } from "../src/gui/analytics-service.js";
 import { createGuiLogger } from "../src/gui/log.js";
 import { createSnapshotService, type SnapshotSource } from "../src/gui/snapshot-service.js";
 import { createDashboardReadSource } from "../src/gui/sources.js";
+import { createUsageSnapshotBuilder } from "../src/gui/usage-service.js";
+import {
+  openUsageStore,
+  type UsageCycleSample,
+  type UsageSeriesMetadata,
+  type UsageStore,
+} from "../src/lib/usage-store.js";
 
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
+const MINUTE = 60_000;
 const logger = createGuiLogger({ sink: () => {} });
+
+const roots: string[] = [];
+const stores: UsageStore[] = [];
+
+afterEach(async () => {
+  for (const store of stores.splice(0)) {
+    try {
+      store.close();
+    } catch {
+      // best effort
+    }
+  }
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+function costed(input: number, apiEquivalentCostUsd: number): CostedTokens {
+  return {
+    input,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: input,
+    apiEquivalentCostUsd,
+    unpricedTokens: 0,
+    unknownTokens: 0,
+  };
+}
+
+function entry(): UsageActivityEntry {
+  return {
+    providerId: "anthropic",
+    modelId: "claude-sonnet",
+    tokens: costed(100, 1),
+    stepCount: 2,
+  };
+}
+
+/** Aligned with the query; certification comes from the caller's coverage. */
+function activityIntervals(query: UsageActivityQuery) {
+  return query.intervals.map((interval) => ({
+    startMs: interval.startMs,
+    endMs: interval.endMs,
+    entries: [entry()],
+    incomplete: false,
+    unpricedTokens: 0,
+    unknownTokens: 0,
+  }));
+}
+
+function usageSeries(): UsageSeriesMetadata {
+  return {
+    rowId: "anthropic:aaaaaa#window:five_hour|quota:percent",
+    cardId: "anthropic:aaaaaa",
+    rowKey: "window:five_hour|quota:percent",
+    providerId: "anthropic",
+    providerLabel: "Anthropic",
+    label: "5h",
+    metricJson: JSON.stringify({ kind: "window", window: "five_hour" }),
+    measurement: "provider-observed",
+    source: "opencode-poll",
+  };
+}
+
+async function storeWithBurn(): Promise<UsageStore> {
+  const root = await mkdtemp(join(tmpdir(), "ocq-usage-notify-"));
+  roots.push(root);
+  const opened = await openUsageStore(join(root, "usage-history.sqlite"));
+  stores.push(opened);
+  const series = usageSeries();
+  [80, 70].forEach((remaining, index) => {
+    const sample: UsageCycleSample = {
+      series,
+      remainingPercent: remaining,
+      measuredAtMs: NOW + index * MINUTE,
+    };
+    opened.recordCycle({
+      collectorRunId: `run-${index}`,
+      collectorSessionId: "session-1",
+      intervalMs: MINUTE,
+      observedCards: [
+        { cardId: series.cardId, providerId: series.providerId, atMs: sample.measuredAtMs },
+      ],
+      providerIds: [series.providerId],
+      samples: [sample],
+      interruptions: [],
+      nowMs: sample.measuredAtMs,
+    });
+  });
+  return opened;
+}
 
 function flushAsync(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -210,5 +313,127 @@ describe("analytics generation notifications", () => {
     release();
     snapshots.close();
     await source.close?.();
+  });
+
+  it("exposes the internal activity read without touching quota polling", async () => {
+    const transport: AnalyticsTransport = {
+      async init() {},
+      async home(range) {
+        return homeFor(range, 0);
+      },
+      async project() {
+        throw new Error("unused");
+      },
+      async session() {
+        throw new Error("unused");
+      },
+      async groups() {
+        throw new Error("unused");
+      },
+      async refresh() {},
+      async activity(query) {
+        return {
+          intervals: query.intervals.map(({ startMs, endMs }) => ({
+            startMs,
+            endMs,
+            entries: [],
+            incomplete: false,
+            unpricedTokens: 0,
+            unknownTokens: 0,
+          })),
+        };
+      },
+      async close() {},
+    };
+    const analytics = createAnalyticsReadService({ createTransport: () => transport });
+    const collectProviderResults = vi.fn();
+    const source = createDashboardReadSource({
+      client: {} as never,
+      workspaceRoot: ".",
+      analyticsService: analytics,
+      collectProviderResults,
+    });
+
+    const result = await source.activity({
+      intervals: [{ startMs: NOW - 3_600_000, endMs: NOW }],
+      providerIds: ["openai"],
+    });
+    expect(result.intervals[0]?.startMs).toBe(NOW - 3_600_000);
+    expect(collectProviderResults).not.toHaveBeenCalled();
+    await source.close?.();
+  });
+
+  it("re-derives the active Usage snapshot when only the coverage advances", async () => {
+    const store = await storeWithBurn();
+    // The index behind attribution reaches past the recorded quota history
+    // until the queued refresh advances it.
+    let coveredUntilMs = NOW;
+    let usageReads = 0;
+    const usage = createUsageSnapshotBuilder({
+      store,
+      now: () => NOW + MINUTE,
+      timeZone: "UTC",
+      activity: async (query) => ({
+        intervals: activityIntervals(query),
+        coverage: { complete: coveredUntilMs >= NOW + MINUTE, stale: false },
+      }),
+    });
+    let notify: (() => void) | undefined;
+    const source: SnapshotSource = {
+      home: async () => {
+        throw new Error("unused");
+      },
+      project: async () => {
+        throw new Error("unused");
+      },
+      session: async () => {
+        throw new Error("unused");
+      },
+      usage: async (input) => {
+        usageReads += 1;
+        return usage.usage(input);
+      },
+      subscribeAnalytics(listener) {
+        notify = listener;
+        return () => {
+          notify = undefined;
+        };
+      },
+    };
+    const service = createSnapshotService({
+      source,
+      analyticsIntervalMs: 600_000,
+      quotaIntervalMs: 600_000,
+      now: () => NOW + MINUTE,
+      logger,
+    });
+    const topics: string[] = [];
+    service.subscribe((event) => topics.push(event.topic));
+    const release = service.addViewer();
+    // Usage lives in the Quota area: it is the only active surface here.
+    service.setViewScope("quota");
+
+    const first = await service.usage({ range: "lifetime" });
+    expect(first.activityUnavailable).toBe(true);
+    expect(first.accounts[0]?.windows[0]?.intervals[0]?.attributedBurnPercentPoints).toBe(0);
+    expect(topics).toEqual([]);
+
+    // The background refresh advanced the extent without changing any indexed
+    // row, so the generation notification is the only coverage signal.
+    coveredUntilMs = NOW + MINUTE;
+    notify?.();
+    await vi.waitFor(() => expect(topics).toContain("quota.changed"));
+
+    const published = await service.usage({ range: "lifetime" });
+    expect(published.activityUnavailable).toBeUndefined();
+    expect(published.accounts[0]?.windows[0]?.intervals[0]?.attributedBurnPercentPoints).toBe(10);
+    expect(published.accounts[0]?.windows[0]?.breakdown).toHaveLength(1);
+    // The notification re-derived the page; the read above joined that result
+    // instead of starting a third compute.
+    expect(usageReads).toBe(2);
+    expect(topics.filter((topic) => topic === "quota.changed")).toHaveLength(1);
+
+    release();
+    service.close();
   });
 });

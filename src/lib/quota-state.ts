@@ -85,6 +85,31 @@ function withoutExpiredClaudeResets(result: QuotaProviderResult): QuotaProviderR
 const inMemoryCache = new Map<string, PersistedQuotaProviderCacheEntry & { stale?: boolean }>();
 const inFlightByKey = new Map<string, Promise<QuotaProviderResult>>();
 const refreshByKey = new Map<string, Promise<QuotaProviderResult>>();
+
+/**
+ * Genuine measurement time of one returned provider result, kept off the DTO.
+ * A fresh fetch records its completion/cache-entry timestamp; a memory or disk
+ * replay records the cache entry's original timestamp, so the same measurement
+ * read twice maps to the same usage sample. Clones must be re-marked.
+ */
+const measuredAtByResult = new WeakMap<object, number>();
+
+export function quotaResultMeasuredAtMs(result: QuotaProviderResult): number | undefined {
+  return measuredAtByResult.get(result);
+}
+
+export function markQuotaResultMeasuredAt<T extends QuotaProviderResult>(
+  result: T,
+  measuredAtMs: number,
+): T {
+  measuredAtByResult.set(result, measuredAtMs);
+  return result;
+}
+
+function measuredClone(result: QuotaProviderResult, measuredAtMs: number): QuotaProviderResult {
+  return markQuotaResultMeasuredAt(cloneQuotaProviderResult(result), measuredAtMs);
+}
+
 type ProcessLocalLatestEntry = { result: QuotaProviderResult; timestamp: number };
 let processLocalLatestByRuntime = new WeakMap<
   object,
@@ -463,6 +488,7 @@ export async function fetchQuotaProviderResult(params: {
     cacheContext: QuotaProviderCacheContext = {},
   ): Promise<QuotaProviderResult> => {
     const snapshot = await fetchValidatedProviderResult(provider, ctx, cacheContext);
+    const measuredAtMs = Date.now();
     rememberProcessLocalLatest({
       provider,
       ctx,
@@ -475,7 +501,7 @@ export async function fetchQuotaProviderResult(params: {
       snapshotId: `uncached:${provider.id}`,
       result: snapshot,
     });
-    return snapshot;
+    return markQuotaResultMeasuredAt(snapshot, measuredAtMs);
   };
 
   if (bypassCache && !isLiveLocalUsageProviderId(provider.id)) return fetchUncached();
@@ -494,6 +520,16 @@ export async function fetchQuotaProviderResult(params: {
     runtimeEligibleQuotaProviders,
     resolvedAuthIdentity: scope.resolvedAuthIdentity,
   });
+  // A clone of an already-measured result keeps that measurement's time; the
+  // cache entry is the fallback when the result came from another writer. A
+  // result with no evidence stays unmarked so the usage recorder rejects it
+  // instead of inventing a `Date.now()` observation.
+  const measuredReplay = (result: QuotaProviderResult): QuotaProviderResult => {
+    const measuredAt = quotaResultMeasuredAtMs(result) ?? inMemoryCache.get(key)?.timestamp;
+    return measuredAt === undefined
+      ? cloneQuotaProviderResult(result)
+      : measuredClone(result, measuredAt);
+  };
   // A process-local identity (Windows) may key only the in-memory tier: the value is not stable
   // across restarts, so it must never name a persisted file.
   const memoryOnly = scope.memoryOnly === true;
@@ -503,7 +539,9 @@ export async function fetchQuotaProviderResult(params: {
 
   if (params.forceRefresh && !isLiveLocalUsageProviderId(provider.id)) {
     const existing = refreshByKey.get(key);
-    if (existing) return cloneQuotaProviderResult(await existing);
+    if (existing) {
+      return measuredReplay(await existing);
+    }
     const refresh = (async () => {
       // An earlier ordinary request is not a refresh; wait for it to settle
       // before retrying so its result cannot overwrite the newer measurement.
@@ -512,7 +550,7 @@ export async function fetchQuotaProviderResult(params: {
     })();
     refreshByKey.set(key, refresh);
     try {
-      return cloneQuotaProviderResult(await refresh);
+      return measuredReplay(await refresh);
     } finally {
       if (refreshByKey.get(key) === refresh) refreshByKey.delete(key);
     }
@@ -521,7 +559,7 @@ export async function fetchQuotaProviderResult(params: {
   if (isLiveLocalUsageProviderId(provider.id)) {
     const snapshot = await fetchValidatedProviderResult(provider, ctx, cacheContext);
     if (!(await isProviderCacheScopeCurrent(provider, ctx, scope))) {
-      return snapshot;
+      return markQuotaResultMeasuredAt(snapshot, Date.now());
     }
     const entry = encodePersistedQuotaProviderCacheEntry({
       packageVersion: await getQuotaProviderCachePackageVersion(),
@@ -541,7 +579,7 @@ export async function fetchQuotaProviderResult(params: {
       result: snapshot,
       cacheTimestamp: entry.timestamp,
     });
-    return snapshot;
+    return markQuotaResultMeasuredAt(snapshot, entry.timestamp);
   }
 
   const forceAggregateRefresh =
@@ -567,7 +605,10 @@ export async function fetchQuotaProviderResult(params: {
       result: inMemory.result,
       cacheTimestamp: inMemory.timestamp,
     });
-    return withoutExpiredClaudeResets(cloneQuotaProviderResult(inMemory.result));
+    return markQuotaResultMeasuredAt(
+      withoutExpiredClaudeResets(cloneQuotaProviderResult(inMemory.result)),
+      inMemory.timestamp,
+    );
   }
 
   const inFlight = inFlightByKey.get(key);
@@ -584,7 +625,7 @@ export async function fetchQuotaProviderResult(params: {
       result: snapshot,
       cacheTimestamp: inMemoryCache.get(key)?.timestamp,
     });
-    return cloneQuotaProviderResult(snapshot);
+    return measuredReplay(snapshot);
   }
 
   const persisted =
@@ -609,7 +650,10 @@ export async function fetchQuotaProviderResult(params: {
       result: persisted.result,
       cacheTimestamp: persisted.timestamp,
     });
-    return withoutExpiredClaudeResets(cloneQuotaProviderResult(persisted.result));
+    return markQuotaResultMeasuredAt(
+      withoutExpiredClaudeResets(cloneQuotaProviderResult(persisted.result)),
+      persisted.timestamp,
+    );
   }
 
   const inFlightAfterDiskRead = inFlightByKey.get(key);
@@ -626,7 +670,7 @@ export async function fetchQuotaProviderResult(params: {
       result: snapshot,
       cacheTimestamp: inMemoryCache.get(key)?.timestamp,
     });
-    return cloneQuotaProviderResult(snapshot);
+    return measuredReplay(snapshot);
   }
 
   const fetchPromise = (async () => {
@@ -664,6 +708,7 @@ export async function fetchQuotaProviderResult(params: {
       throw error;
     }
 
+    const completedAtMs = Date.now();
     const failures = snapshot.errors.filter((error) => error.kind !== "intentional-filter");
     const allFailuresTransient =
       failures.length > 0 &&
@@ -711,7 +756,7 @@ export async function fetchQuotaProviderResult(params: {
           result: cloneQuotaProviderResult(stale),
         });
         await removePersistedCacheFile();
-        return stale;
+        return markQuotaResultMeasuredAt(stale, completedAtMs);
       }
     }
 
@@ -722,7 +767,7 @@ export async function fetchQuotaProviderResult(params: {
     ) {
       inMemoryCache.delete(key);
       await removePersistedCacheFile();
-      return snapshot;
+      return markQuotaResultMeasuredAt(snapshot, completedAtMs);
     }
 
     const entry = encodePersistedQuotaProviderCacheEntry({
@@ -736,7 +781,7 @@ export async function fetchQuotaProviderResult(params: {
     if (snapshot.errors.some((error) => error.kind !== "intentional-filter")) {
       inMemoryCache.set(key, { ...entry, stale: true, result: cloneQuotaProviderResult(snapshot) });
       await removePersistedCacheFile();
-      return snapshot;
+      return markQuotaResultMeasuredAt(snapshot, entry.timestamp);
     }
 
     inMemoryCache.set(key, {
@@ -744,7 +789,7 @@ export async function fetchQuotaProviderResult(params: {
       result: cloneQuotaProviderResult(entry.result),
     });
     if (!memoryOnly) await writePersistedQuotaProviderCacheEntry(entry, key);
-    return snapshot;
+    return markQuotaResultMeasuredAt(snapshot, entry.timestamp);
   })().finally(() => {
     inFlightByKey.delete(key);
   });
@@ -758,7 +803,7 @@ export async function fetchQuotaProviderResult(params: {
     result: snapshot,
     cacheTimestamp: inMemoryCache.get(key)?.timestamp,
   });
-  return cloneQuotaProviderResult(snapshot);
+  return measuredReplay(snapshot);
 }
 
 export type CachedProviderRead =

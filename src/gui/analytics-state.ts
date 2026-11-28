@@ -1,17 +1,18 @@
 /**
- * Compact, versioned analytics snapshot persistence (schema v3).
+ * Compact, versioned analytics snapshot persistence (schema v5).
  *
  * The worker owns the large in-memory analytics index. Persistence keeps one
  * compact fingerprint contribution dictionary (referenced by numeric index),
- * occurrence membership (message/session identity + revision watermark), the
- * stable source identity, the coverage extent/frontier, the trusted source
- * cursor and rare-repair wall time. The compact index excludes raw message
- * JSON, assistant agent strings, compaction markers, and duplicate raw rows. A separate
- * local presentation sidecar may carry bounded Home/Project/Session DTO detail
- * (including the DTO's agent fields and compaction markers).
+ * occurrence membership (message/session identity, revision watermark, recorded
+ * reasoning effort), the stable source identity, the coverage extent/frontier,
+ * the trusted source cursor and rare-repair wall time. The compact index
+ * excludes raw message JSON, assistant agent strings, compaction markers, and
+ * duplicate raw rows. A separate local presentation sidecar may carry bounded
+ * Home/Project/Session DTO detail (including the DTO's agent fields and
+ * compaction markers).
  */
 import { existsSync } from "node:fs";
-import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type { HomeSnapshot, ProjectSnapshot, SessionSnapshot } from "../contracts/dashboard.js";
@@ -25,9 +26,11 @@ import {
   rawAssistantRowFingerprint,
 } from "../lib/opencode-storage.js";
 import { getAnalyticsPricingFingerprint } from "./analytics-pricing-revision.js";
+import { createGuiLogger, type GuiLogger } from "./log.js";
 
 /** 4: compact fingerprints carry unknown-vs-zero cache telemetry (v3 files rebuild). */
-export const ANALYTICS_SNAPSHOT_VERSION = 4;
+/** 5: compact occurrences persist recorded reasoning effort (v4 files rebuild). */
+export const ANALYTICS_SNAPSHOT_VERSION = 5;
 export const ANALYTICS_SNAPSHOT_SCHEMA = "ocq-analytics-state";
 /**
  * Warm DTO aggregation semantics. This is separate from the compact candidate
@@ -234,7 +237,14 @@ interface PersistedAnalyticsStateV3 {
   extent: { sinceMs: number | null; untilMs: number } | null;
   fingerprints: CompactFingerprint[];
   occurrences: Array<
-    [fingerprintIndex: number, sessionID: string, messageID: string, updatedAtMs: number | null]
+    [
+      fingerprintIndex: number,
+      sessionID: string,
+      messageID: string,
+      updatedAtMs: number | null,
+      /** Additive v5 field: recorded `model.variant`; absent = unknown. */
+      variant?: string | null,
+    ]
   >;
   sessions: Array<
     [
@@ -275,12 +285,14 @@ export function encodeAnalyticsState(
 ): PersistedAnalyticsStateV3 {
   const occurrences: PersistedAnalyticsStateV3["occurrences"] = [];
   for (const occurrence of state.occurrences.values()) {
-    occurrences.push([
+    const tuple: PersistedAnalyticsStateV3["occurrences"][number] = [
       occurrence.fingerprintIndex,
       occurrence.sessionID,
       occurrence.messageID,
       occurrence.updatedAtMs,
-    ]);
+    ];
+    if (occurrence.variant !== undefined) tuple.push(occurrence.variant);
+    occurrences.push(tuple);
   }
 
   const sessions: PersistedAnalyticsStateV3["sessions"] = Object.values(state.sessions)
@@ -380,8 +392,9 @@ function isCompactFingerprint(value: unknown): value is CompactFingerprint {
 }
 
 function isOccurrenceTuple(value: unknown, fingerprintCount: number): boolean {
-  if (!Array.isArray(value) || value.length !== 4) return false;
+  if (!Array.isArray(value) || (value.length !== 4 && value.length !== 5)) return false;
   if (!Number.isInteger(value[0]) || value[0] < 0 || value[0] >= fingerprintCount) return false;
+  if (value.length === 5 && !isStringOrNull(value[4])) return false;
   return (
     typeof value[1] === "string" &&
     value[1].length > 0 &&
@@ -572,6 +585,7 @@ export function decodeAnalyticsState(value: unknown): AnalyticsState | undefined
       sessionID: tuple[1],
       messageID: tuple[2],
       updatedAtMs: tuple[3],
+      ...(tuple[4] === undefined || tuple[4] === null ? {} : { variant: tuple[4] }),
     });
   }
 
@@ -933,11 +947,67 @@ export async function saveAnalyticsSnapshot(
 
 /** Load a snapshot; missing, corrupt, or unsupported files are ignored. */
 export async function loadAnalyticsSnapshot(path: string): Promise<AnalyticsState | undefined> {
+  await removeOrphanedAnalyticsTemps(path);
   try {
     if (!existsSync(path)) return undefined;
     const text = await readFile(path, "utf8");
     return decodeAnalyticsState(JSON.parse(text) as unknown);
   } catch {
     return undefined;
+  }
+}
+
+const analyticsLogger: GuiLogger = createGuiLogger();
+
+/**
+ * Exactly this module's writer temp naming for the compact snapshot and its
+ * presentation sidecar: `<base>.<pid>.<base36>.tmp`. The shared atomic helpers
+ * in `src/lib/atomic-json.ts` use `.tmp-<pid>-<ts>-<hex>` and must never match.
+ */
+const ANALYTICS_TEMP_PATTERN = /^analytics-v3\.json(?:\.presentation\.json)?\.\d+\.[a-z0-9]+\.tmp$/;
+
+/** A concurrent writer mid-save is never touched; only abandoned temps are. */
+const ANALYTICS_TEMP_ORPHAN_MAX_AGE_MS = 3_600_000;
+
+function errorCodeOf(error: unknown): string {
+  if (error !== null && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) return code;
+  }
+  return "unknown";
+}
+
+/**
+ * Best-effort removal of this writer's orphaned temp files next to the compact
+ * snapshot. A crash between temp write and rename leaves them behind forever;
+ * load/startup is the one place they can be reclaimed. Never throws, never
+ * logs paths, and never touches any other file.
+ */
+async function removeOrphanedAnalyticsTemps(snapshotPath: string): Promise<void> {
+  try {
+    const directory = dirname(snapshotPath);
+    const entries = await readdir(directory, { withFileTypes: true });
+    const cutoffMs = Date.now() - ANALYTICS_TEMP_ORPHAN_MAX_AGE_MS;
+    let removed = 0;
+    for (const entry of entries) {
+      if (!ANALYTICS_TEMP_PATTERN.test(entry.name)) continue;
+      const candidate = join(directory, entry.name);
+      try {
+        const stats = await lstat(candidate);
+        if (!stats.isFile() || stats.mtimeMs > cutoffMs) continue;
+        await unlink(candidate);
+        removed += 1;
+      } catch {
+        // Best effort: the temp file survives until the next load.
+      }
+    }
+    if (removed > 0) {
+      analyticsLogger.info("analytics orphaned snapshot temps removed", String(removed));
+    }
+  } catch (error) {
+    const code = errorCodeOf(error);
+    // No state directory yet (first run): nothing to reclaim, nothing to report.
+    if (code === "ENOENT") return;
+    analyticsLogger.warn("analytics orphaned snapshot temp cleanup failed", code);
   }
 }

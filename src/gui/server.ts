@@ -23,9 +23,11 @@ import {
   type AnalyticsGroupQuery,
   DASHBOARD_CONTRACT_VERSION,
   type GuiSettingsStore,
+  type ImportedHistoryDeleter,
   type JsonValue,
 } from "../contracts/dashboard.js";
 import { DEFAULT_RANGE_KEY, isRangeKey, type RangeKey } from "../contracts/ranges.js";
+import { isUsageImportHarness, isUsageRangeKey, type UsageRangeKey } from "../contracts/usage.js";
 import { GuiSettingsError } from "./config.js";
 import {
   DASHBOARD_ERROR_MESSAGES,
@@ -57,6 +59,12 @@ export interface DashboardServerOptions {
    */
   snapshots: SnapshotService;
   settings: GuiSettingsStore;
+  /**
+   * Optional usage recorder seam. Absent on hosts without usage history: the
+   * delete route then reports a controlled `config-target-error` instead of
+   * pretending the private store was emptied.
+   */
+  usage?: ImportedHistoryDeleter;
   /** Static root; defaults to `<package>/dist/ui` derived from this module. */
   assetRoot?: string;
   /** SSE heartbeat override (test seam; default 20 s). */
@@ -306,6 +314,12 @@ function parseRange(url: URL): RangeKey | undefined {
   return isRangeKey(raw) ? raw : undefined;
 }
 
+function parseUsageRange(url: URL): UsageRangeKey | undefined {
+  const raw = url.searchParams.get("range");
+  if (raw === null) return "current";
+  return isUsageRangeKey(raw) ? raw : undefined;
+}
+
 /** `/models` plus exact `/model|provider/<canonical entity token>` direct links. */
 function isAnalyticsUiPath(pathname: string): boolean {
   if (pathname === "/models") return true;
@@ -322,7 +336,7 @@ function isAnalyticsUiPath(pathname: string): boolean {
 
 /** Known UI paths only: never reinterpret an asset or malformed id as HTML. */
 function isUiPath(pathname: string): boolean {
-  if (["/", "/quota", "/analytics", "/settings"].includes(pathname)) return true;
+  if (["/", "/quota", "/usage", "/analytics", "/settings"].includes(pathname)) return true;
   if (isAnalyticsUiPath(pathname)) return true;
   const match = /^\/(?:project|session)\/([^/]+)$/.exec(pathname);
   if (!match) return false;
@@ -545,6 +559,20 @@ export function createDashboardServer(
       return;
     }
 
+    if (rest.length === 1 && rest[0] === "usage") {
+      if (!requireMethods(req, res, ["GET", "HEAD"])) return;
+      const range = parseUsageRange(url);
+      if (range === undefined) {
+        sendError(res, "bad-request");
+        return;
+      }
+      // Usage is part of the Quota area: it keeps the provider poller's
+      // already-collected history and never asks analytics to refresh.
+      snapshots.setViewScope("quota", "request");
+      sendJson(res, 200, await snapshots.usage({ range }));
+      return;
+    }
+
     if (rest.length === 1 && rest[0] === "home") {
       if (!requireMethods(req, res, ["GET", "HEAD"])) return;
       const range = parseRange(url);
@@ -714,6 +742,33 @@ export function createDashboardServer(
       }
       await open();
       sendJson(res, 200, { opened: true });
+      return;
+    }
+
+    if (rest.length === 2 && rest[0] === "imported-history" && rest[1] === "delete") {
+      if (!requireMethods(req, res, ["POST"])) return;
+      const parsed = await readWriteJson(req, res);
+      if (!parsed.ok) return;
+      if (!isRecord(parsed.value) || !hasExactKeys(parsed.value, ["harness"])) {
+        sendError(res, "bad-request");
+        return;
+      }
+      const harness = parsed.value.harness;
+      if (!isUsageImportHarness(harness)) {
+        sendError(res, "bad-request");
+        return;
+      }
+      const usage = options.usage;
+      if (!usage) {
+        throw new GuiSettingsError(
+          "config-target-error",
+          "Deleting imported history is not available",
+        );
+      }
+      // Counts only: the response never names a row, hash or path.
+      const result = await usage.deleteImportedHistory(harness);
+      snapshots.notifyUsageChanged();
+      sendJson(res, 200, result);
       return;
     }
 

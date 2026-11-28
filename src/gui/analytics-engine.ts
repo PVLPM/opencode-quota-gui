@@ -26,6 +26,11 @@ import type {
   SessionSnapshot,
 } from "../contracts/dashboard.js";
 import { isRangeKey, type RangeKey, rangeWindow } from "../contracts/ranges.js";
+import type {
+  UsageActivityCoverage,
+  UsageActivityQuery,
+  UsageActivityResult,
+} from "../contracts/usage-activity.js";
 import {
   compareOpenCodeSourceIdentity,
   type OpenCodeMessageRevisionSnapshot,
@@ -77,6 +82,7 @@ const MAX_PROJECT_CACHE = 12;
 /** Bound on in-memory grouped DTOs; keeps detail navigation from growing state. */
 const MAX_GROUP_CACHE = 24;
 const PRESENTATION_SAVE_INTERVAL_MS = 60_000;
+const DAY_MS = 24 * 60 * 60_000;
 const HOME_PRECOMPUTE_RANGES: readonly RangeKey[] = ["24h", "7d", "30d"];
 
 /**
@@ -125,7 +131,11 @@ export interface AnalyticsEngineOptions {
   savePresentation?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
   /** Host calendar zone; defaults to the machine running the worker. */
   timeZone?: string;
-  /** Host notification after a refresh produced a new data generation. */
+  /**
+   * Host notification after a refresh produced a new data generation, changed a
+   * cached scope, or changed activity coverage. The last case keeps no indexed
+   * row change, so `generation` may repeat the previous value.
+   */
   onGeneration?: (generation: number) => void;
   /** Bound on draining queued persistence during close. */
   closeWriteTimeoutMs?: number;
@@ -148,6 +158,8 @@ export interface AnalyticsWorkerMemory {
 }
 
 export interface AnalyticsEngine extends AnalyticsRangeReader {
+  /** Internal usage-activity read over owned hour buckets; never polls providers. */
+  activity(query: UsageActivityQuery): Promise<UsageActivityResult>;
   stats(): Promise<AnalyticsWorkerMemory>;
   /** Best-effort GC trigger; false when the runtime exposes no hook. */
   gc(): Promise<boolean>;
@@ -781,6 +793,73 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   function isStale(atMs: number): boolean {
     if (unavailable) return true;
     return atMs - state.frontierAtMs >= refreshIntervalMs;
+  }
+
+  /** Earliest start and latest end of the requested intervals. */
+  function activitySpan(
+    intervals: UsageActivityQuery["intervals"],
+  ): { sinceMs: number; untilMs: number } | undefined {
+    let sinceMs = Number.POSITIVE_INFINITY;
+    let untilMs = Number.NEGATIVE_INFINITY;
+    for (const interval of intervals) {
+      sinceMs = Math.min(sinceMs, interval.startMs);
+      untilMs = Math.max(untilMs, interval.endMs);
+    }
+    return Number.isFinite(sinceMs) && Number.isFinite(untilMs) ? { sinceMs, untilMs } : undefined;
+  }
+
+  /**
+   * Coverage/freshness of the loaded index for one activity query. The index
+   * only proves "no activity" inside its persisted extent, so an interval that
+   * starts before or ends after that extent (or an untrusted read) must not be
+   * reported as covered: the Usage service certifies attribution from this.
+   * `refreshNow` marks a trusted index that simply does not reach the requested
+   * intervals yet, where waiting for the next due slot would keep a covered
+   * answer away for a whole refresh interval.
+   */
+  function activityCoverage(
+    span: { sinceMs: number; untilMs: number } | undefined,
+    atMs: number,
+  ): { coverage: UsageActivityCoverage; refreshNow: boolean } {
+    const extent = state.extent;
+    const trusted = indexLoaded && coverageTrusted && !sidecarNewerThanIndex && !unavailable;
+    const covered =
+      span === undefined ||
+      (trusted &&
+        extent !== undefined &&
+        coversSince(span.sinceMs, extent) &&
+        extent.untilMs >= span.untilMs);
+    return {
+      coverage: { complete: covered, stale: isStale(atMs) },
+      refreshNow: span !== undefined && trusted && !covered,
+    };
+  }
+
+  /**
+   * Everything `activityCoverage` derives from, for span-independent comparison.
+   * A change here re-certifies activity reads that previously fell outside the
+   * index, so the host must re-derive its Usage attribution even though no
+   * indexed row changed.
+   */
+  function coverageSignature(atMs: number): string {
+    return [
+      indexLoaded ? "1" : "0",
+      coverageTrusted ? "1" : "0",
+      sidecarNewerThanIndex ? "1" : "0",
+      unavailable ? "1" : "0",
+      state.extent?.sinceMs ?? "",
+      state.extent?.untilMs ?? "",
+      isStale(atMs) ? "1" : "0",
+    ].join("|");
+  }
+
+  /** Smallest range whose rolling window still starts at/before `sinceMs`. */
+  function activityRange(sinceMs: number, atMs: number): RangeKey {
+    const ageMs = Math.max(0, atMs - sinceMs);
+    if (ageMs <= DAY_MS) return "24h";
+    if (ageMs <= 7 * DAY_MS) return "7d";
+    if (ageMs <= 30 * DAY_MS) return "30d";
+    return "lifetime";
   }
 
   function isDetailFresh(sessionId: string, atMs: number): boolean {
@@ -2231,6 +2310,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const priorFutureCompletionAtMs = state.futureCompletionAtMs;
     const priorExtentSinceMs = state.extent?.sinceMs;
     const priorSourceIdentity = state.sourceIdentity;
+    const priorCoverage = coverageSignature(atMs);
     if (job.globalRange !== undefined) lastGlobalAttemptAtMs = atMs;
     else lastScopedAttemptAtMs = atMs;
 
@@ -2335,6 +2415,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const agentAffectedSessionIds = new Set<string>();
     const sourceUnchanged = candidate.sourceUnchanged === true;
     let updatedAtChanged = false;
+    let variantChanged = false;
     let occurrenceRemoved = false;
 
     // The final staged row is the only authoritative payload for a message id:
@@ -2378,13 +2459,15 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         agentProjected &&
         (row.agent !== occurrence.agent || row.variant !== occurrence.variant)
       ) {
-        // Compact occurrences do not persist agent/variant; filling them from
-        // the first unchanged-source detail read does not change the cached DTO.
+        // Agent stays detail-only; effort is persisted, so a changed recorded
+        // variant must flush the compact occurrence.
         const wasKnown = occurrence.agent !== undefined || occurrence.variant !== undefined;
+        const nextVariantChanged = row.variant !== occurrence.variant;
         if (row.agent === undefined) delete occurrence.agent;
         else occurrence.agent = row.agent;
         if (row.variant === undefined) delete occurrence.variant;
         else occurrence.variant = row.variant;
+        if (nextVariantChanged) variantChanged = true;
         agentUpserts.push(row);
         if (wasKnown || !sourceUnchanged) agentAffectedSessionIds.add(row.sessionID);
       }
@@ -2527,6 +2610,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       if (invalidateCachedSessions(affectedSessionIds)) sessionCacheInvalidated = true;
     }
+    // Activity coverage is invisible in the indexed rows but decides whether the
+    // host may certify an activity read, so a coverage-only batch must reach it.
+    const coverageChanged = coverageSignature(atMs) !== priorCoverage;
     if (dataChanged || candidate.extentChanged || sessionCacheInvalidated) {
       generation += 1;
       // Extending empty coverage is not a visible data change; keep the sidecar
@@ -2574,6 +2660,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const snapshotNeeded =
       dataChanged ||
       updatedAtChanged ||
+      variantChanged ||
       cursorChanged ||
       repairChanged ||
       signatureChanged ||
@@ -2591,7 +2678,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (hasUsefulPresentation() || sessionCacheInvalidated || finitePresentationChanged) {
       queuePresentationWrite(atMs, atMs, sessionCacheInvalidated || finitePresentationChanged);
     }
-    if ((dataChanged || sessionCacheInvalidated) && !closed && !closing) {
+    if ((dataChanged || sessionCacheInvalidated || coverageChanged) && !closed && !closing) {
       try {
         options.onGeneration?.(generation);
       } catch {
@@ -2833,6 +2920,31 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       };
       storeGroupSnapshot(query, result);
       return result;
+    },
+
+    async activity(query) {
+      if (closed) throw new Error("analytics closed");
+      await ensureLoaded();
+      ensurePricingRevision();
+      await ensureIndexLoaded();
+      const atMs = now();
+      const span = activitySpan(query.intervals);
+      const { coverage, refreshNow } = activityCoverage(span, atMs);
+      if (span !== undefined && (!coverage.complete || coverage.stale)) {
+        // Same bounded background path as a Home/group read: it never scans in
+        // the foreground, and an already scheduled refresh is merged.
+        requestBackground(
+          {
+            globalRange: activityRange(span.sinceMs, atMs),
+            detailSessionIds: [],
+            projectScopes: [],
+          },
+          refreshNow,
+        );
+      }
+      ensureModel();
+      const result = measureSync("dtoAggregation", () => model.activity(query));
+      return { ...result, coverage };
     },
 
     async project(projectId, range) {

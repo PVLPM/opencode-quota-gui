@@ -13,6 +13,7 @@ import {
   validSettingsSnapshot,
   validSettingsWriteResult,
   validUsage,
+  validUsageSnapshot,
 } from "./helpers/dashboard-dto-fixtures.js";
 
 type ValidateResult = { value?: unknown; issues?: ReadonlyArray<{ message: string }> };
@@ -76,6 +77,7 @@ describe("dashboard RPC definition", () => {
     expect(Object.keys(methods)).toEqual([
       "health",
       "quota",
+      "usage",
       "home",
       "groups",
       "project",
@@ -86,6 +88,7 @@ describe("dashboard RPC definition", () => {
       "importPreview",
       "importApply",
       "openSettingsFile",
+      "deleteImportedHistory",
       "watch",
     ]);
     expect(Object.keys(DashboardRpc.events)).toEqual(["invalidated", "quotaNotification"]);
@@ -132,6 +135,23 @@ describe("dashboard RPC definition", () => {
       { refresh: true, extra: true },
       "input must be an empty object",
     );
+  });
+
+  it("accepts only a UsageRangeKey for the usage read", async () => {
+    for (const range of ["current", "24h", "7d", "30d", "lifetime"] as const) {
+      await expectAccepted(methods.usage.input, { range });
+    }
+    await expectRejected(
+      methods.usage.input,
+      { range: "90d" },
+      "range must be one of current, 24h, 7d, 30d, lifetime",
+    );
+    await expectRejected(
+      methods.usage.input,
+      { range: "7d", extra: true },
+      "input must contain only range",
+    );
+    await expectRejected(methods.usage.input, {}, "input must contain only range");
   });
 
   it("validates home, project and session resource inputs", async () => {
@@ -279,6 +299,26 @@ describe("dashboard RPC definition", () => {
       methods.importApply.input,
       { expectedRevision: "r", extra: true },
       "input must contain only expectedRevision",
+    );
+
+    // Deletion names exactly one known harness: no path, id or free-form field
+    // can reach the private store through this input.
+    await expectAccepted(methods.deleteImportedHistory.input, { harness: "claude-code" });
+    await expectAccepted(methods.deleteImportedHistory.input, { harness: "codex" });
+    await expectRejected(
+      methods.deleteImportedHistory.input,
+      { harness: "openai" },
+      "harness must be claude-code or codex",
+    );
+    await expectRejected(
+      methods.deleteImportedHistory.input,
+      { harness: "codex", rowId: "codex-import:acct-a#window:week" },
+      "input must contain only harness",
+    );
+    await expectRejected(
+      methods.deleteImportedHistory.input,
+      {},
+      "input must contain only harness",
     );
   });
 
@@ -445,6 +485,7 @@ describe("dashboard RPC definition", () => {
     const cases = [
       ["health", validHealth()],
       ["quota", validQuotaSnapshot()],
+      ["usage", validUsageSnapshot()],
       ["home", validHomeSnapshot()],
       ["groups", validGroupSnapshot()],
       ["project", validProjectSnapshot()],
@@ -474,6 +515,26 @@ describe("dashboard RPC definition", () => {
       methods.openSettingsFile.output,
       { opened: false },
       "output must report opened",
+    );
+
+    // Counts only: a result that tries to describe rows is not this contract.
+    await expectAccepted(methods.deleteImportedHistory.output, {
+      invocations: 3,
+      rateLimitSeries: 1,
+    });
+    await expectAccepted(methods.deleteImportedHistory.output, {
+      invocations: 0,
+      rateLimitSeries: 0,
+    });
+    await expectRejected(
+      methods.deleteImportedHistory.output,
+      { invocations: 3, rateLimitSeries: 1, deletedIds: ["x"] },
+      "output does not match the dashboard contract",
+    );
+    await expectRejected(
+      methods.deleteImportedHistory.output,
+      { invocations: -1, rateLimitSeries: 0 },
+      "output does not match the dashboard contract",
     );
   });
 

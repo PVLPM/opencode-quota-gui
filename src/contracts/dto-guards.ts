@@ -25,6 +25,7 @@ import type {
   Bucket,
   ClaudeAgentAliasPricingProvenance,
   DashboardHealth,
+  DeleteImportedHistoryResult,
   HomeSnapshot,
   ImportPreview,
   JsonValue,
@@ -63,6 +64,23 @@ import type {
   TemporalWeeklySchedule,
   TemporalWeeklyWindow,
 } from "./temporal.js";
+import {
+  isUsageRangeKey,
+  USAGE_IMPORT_HARNESSES,
+  type UsageActivity,
+  type UsageBoundaryKind,
+  type UsageBreakdownRow,
+  type UsageCoverage,
+  type UsageImportedActivity,
+  type UsageInterval,
+  type UsageLink,
+  type UsageMeasurementKind,
+  type UsageModelKey,
+  type UsagePoint,
+  type UsageSnapshot,
+  type UsageSource,
+  type UsageUnattributedReason,
+} from "./usage.js";
 
 type RecordValue = Record<string, unknown>;
 
@@ -546,6 +564,260 @@ export function isQuotaSnapshot(value: unknown): value is QuotaSnapshot {
   );
 }
 
+const USAGE_SOURCES = ["opencode-poll", "codex-import"] as const satisfies readonly UsageSource[];
+const USAGE_ACTIVITY_SOURCES = [
+  "opencode-poll",
+  "codex-import",
+  "claude-code-import",
+] as const satisfies readonly UsageActivity["source"][];
+const USAGE_MEASUREMENT_KINDS = [
+  "provider-observed",
+  "locally-estimated",
+] as const satisfies readonly UsageMeasurementKind[];
+const USAGE_LINK_KINDS = [
+  "observed",
+  "unobserved",
+  "boundary",
+] as const satisfies readonly UsageLink["kind"][];
+const USAGE_BOUNDARY_KINDS = [
+  "reset",
+  "replenished",
+  "identity-change",
+  "uncertain",
+] as const satisfies readonly UsageBoundaryKind[];
+const USAGE_UNATTRIBUTED_REASONS = [
+  "no-activity",
+  "ambiguous-account",
+  "unpriced",
+  "zero-weight",
+  "unobserved-interval",
+  "unidentified-activity",
+] as const satisfies readonly UsageUnattributedReason[];
+const USAGE_IMPORT_STATUSES = ["disabled", "ok", "unavailable", "error"] as const;
+
+function isPercentValue(value: unknown): value is number {
+  return isFiniteNumber(value) && value >= 0 && value <= 100;
+}
+
+function isNonNegative(value: unknown): value is number {
+  return isFiniteNumber(value) && value >= 0;
+}
+
+function isUsageModelKey(value: unknown): value is UsageModelKey {
+  return (
+    isRecord(value) &&
+    isText(value.providerId) &&
+    isText(value.modelId) &&
+    isOptional(value.effort, isText)
+  );
+}
+
+function isUsagePoint(value: unknown): value is UsagePoint {
+  return (
+    isRecord(value) &&
+    isFiniteNumber(value.startMs) &&
+    isFiniteNumber(value.endMs) &&
+    value.endMs >= value.startMs &&
+    isPercentValue(value.remainingPercent) &&
+    isIntegerBetween(value.sampleCount, 1, Number.MAX_SAFE_INTEGER) &&
+    isOptional(value.resetAtMs, isFiniteNumber) &&
+    isOneOf(value.source, USAGE_SOURCES)
+  );
+}
+
+function isUsageLink(value: unknown): value is UsageLink {
+  if (!isRecord(value)) return false;
+  if (value.kind === "observed" || value.kind === "unobserved") return true;
+  return (
+    value.kind === "boundary" &&
+    isOneOf(value.boundary, USAGE_BOUNDARY_KINDS) &&
+    isOptional(value.atMs, isFiniteNumber)
+  );
+}
+
+function isUsageActivity(value: unknown, modelCount: number): value is UsageActivity {
+  return (
+    isRecord(value) &&
+    isIntegerBetween(value.model, 0, Math.max(0, modelCount - 1)) &&
+    isCostedTokens(value.tokens) &&
+    isIntegerBetween(value.stepCount, 0, Number.MAX_SAFE_INTEGER) &&
+    isOptional(value.estimatedBurnPercentPoints, isNonNegative) &&
+    isOneOf(value.source, USAGE_ACTIVITY_SOURCES)
+  );
+}
+
+function isUsageInterval(value: unknown, modelCount: number): value is UsageInterval {
+  return (
+    isRecord(value) &&
+    isIntegerBetween(value.fromPoint, 0, Number.MAX_SAFE_INTEGER) &&
+    isIntegerBetween(value.toPoint, 0, Number.MAX_SAFE_INTEGER) &&
+    value.toPoint >= value.fromPoint &&
+    isFiniteNumber(value.startMs) &&
+    isFiniteNumber(value.endMs) &&
+    value.endMs >= value.startMs &&
+    isPercentValue(value.previousRemainingPercent) &&
+    isPercentValue(value.currentRemainingPercent) &&
+    isOneOf(value.link, USAGE_LINK_KINDS) &&
+    (value.burnPercentPoints === null || isNonNegative(value.burnPercentPoints)) &&
+    isNonNegative(value.attributedBurnPercentPoints) &&
+    isNonNegative(value.unattributedBurnPercentPoints) &&
+    isOptional(value.unattributedReason, (entry) => isOneOf(entry, USAGE_UNATTRIBUTED_REASONS)) &&
+    isOptional(value.conflictAtMs, isFiniteNumber) &&
+    isArrayOf(value.activity, (entry) => isUsageActivity(entry, modelCount))
+  );
+}
+
+function isUsageCoverage(value: unknown): value is UsageCoverage {
+  return (
+    isRecord(value) &&
+    isOptional(value.firstObservedAtMs, isFiniteNumber) &&
+    isOptional(value.lastObservedAtMs, isFiniteNumber) &&
+    isNonNegative(value.observedMs) &&
+    isIntegerBetween(value.sampleCount, 0, Number.MAX_SAFE_INTEGER)
+  );
+}
+
+function isUsageBreakdownEffort(value: unknown, allowEstimatedBurn = true): boolean {
+  return (
+    isRecord(value) &&
+    isOptional(value.effort, isText) &&
+    isCostedTokens(value.tokens) &&
+    isIntegerBetween(value.stepCount, 0, Number.MAX_SAFE_INTEGER) &&
+    (allowEstimatedBurn || value.estimatedBurnPercentPoints === undefined) &&
+    isOptional(value.estimatedBurnPercentPoints, isNonNegative)
+  );
+}
+
+function isUsageBreakdownRow(
+  value: unknown,
+  allowEstimatedBurn = true,
+): value is UsageBreakdownRow {
+  return (
+    isRecord(value) &&
+    isText(value.providerId) &&
+    isText(value.modelId) &&
+    isCostedTokens(value.tokens) &&
+    isIntegerBetween(value.stepCount, 0, Number.MAX_SAFE_INTEGER) &&
+    (allowEstimatedBurn || value.estimatedBurnPercentPoints === undefined) &&
+    isOptional(value.estimatedBurnPercentPoints, isNonNegative) &&
+    isArrayOf(value.efforts, (entry) => isUsageBreakdownEffort(entry, allowEstimatedBurn))
+  );
+}
+
+function isUsageWindowConflict(value: unknown): value is { atMs: number } {
+  return isRecord(value) && isFiniteNumber(value.atMs);
+}
+
+function isUsageWindowSeries(
+  value: unknown,
+  modelCount: number,
+): value is UsageSnapshot["accounts"][number]["windows"][number] {
+  if (
+    !isRecord(value) ||
+    !isText(value.rowId) ||
+    !isText(value.label) ||
+    !isOptional(value.metric, isAccountingMetric) ||
+    !isOneOf(value.measurement, USAGE_MEASUREMENT_KINDS) ||
+    !isRecord(value.axis) ||
+    !isFiniteNumber(value.axis.startMs) ||
+    !isFiniteNumber(value.axis.endMs) ||
+    value.axis.endMs < value.axis.startMs ||
+    !isUsageCoverage(value.coverage) ||
+    !isArrayOf(value.points, isUsagePoint) ||
+    !isArrayOf(value.links, isUsageLink) ||
+    !isArrayOf(value.intervals, (entry) => isUsageInterval(entry, modelCount)) ||
+    !isOptional(value.conflicts, (entry) => isArrayOf(entry, isUsageWindowConflict)) ||
+    !isRecord(value.totals) ||
+    !isNonNegative(value.totals.observedBurnPercentPoints) ||
+    !isNonNegative(value.totals.attributedBurnPercentPoints) ||
+    !isNonNegative(value.totals.unattributedBurnPercentPoints) ||
+    !isArrayOf(value.breakdown, (entry) => isUsageBreakdownRow(entry, true))
+  ) {
+    return false;
+  }
+  const points = value.points as UsagePoint[];
+  const links = value.links as UsageLink[];
+  const intervals = value.intervals as UsageInterval[];
+  // The link array relates consecutive points, so it has exactly one fewer
+  // entry; every interval must reference points that exist on this window.
+  if (links.length !== Math.max(0, points.length - 1)) return false;
+  return intervals.every(
+    (interval) =>
+      interval.fromPoint < points.length &&
+      interval.toPoint < points.length &&
+      interval.toPoint <= interval.fromPoint + 1,
+  );
+}
+
+function isUsageAccount(
+  value: unknown,
+  modelCount: number,
+): value is UsageSnapshot["accounts"][number] {
+  return (
+    isRecord(value) &&
+    isText(value.accountKey) &&
+    isText(value.providerId) &&
+    isText(value.providerLabel) &&
+    isOptional(value.planLabel, isText) &&
+    isOptional(value.accountLabel, isText) &&
+    isOneOf(value.source, USAGE_SOURCES) &&
+    isArrayOf(value.windows, (entry) => isUsageWindowSeries(entry, modelCount))
+  );
+}
+
+function isUsageImport(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isOneOf(value.harness, USAGE_IMPORT_HARNESSES) &&
+    isBoolean(value.enabled) &&
+    isOptional(value.lastImportedAtMs, isFiniteNumber) &&
+    isOneOf(value.status, USAGE_IMPORT_STATUSES)
+  );
+}
+
+function isUsageImportedActivity(value: unknown): value is UsageImportedActivity {
+  return (
+    isRecord(value) &&
+    isOneOf(value.harness, USAGE_IMPORT_HARNESSES) &&
+    isRecord(value.span) &&
+    isFiniteNumber(value.span.startMs) &&
+    isFiniteNumber(value.span.endMs) &&
+    value.span.endMs >= value.span.startMs &&
+    isArrayOf(value.models, (entry) => isUsageBreakdownRow(entry, false)) &&
+    isCostedTokens(value.totals) &&
+    isIntegerBetween(value.stepCount, 0, Number.MAX_SAFE_INTEGER) &&
+    isBoolean(value.incomplete)
+  );
+}
+
+/** Strict structural guard for the v1.4.0 usage history payload. */
+export function isUsageSnapshot(value: unknown): value is UsageSnapshot {
+  if (
+    !isRecord(value) ||
+    !isFiniteNumber(value.generatedAtMs) ||
+    !isUsageRangeKey(value.range) ||
+    !isText(value.timeZone) ||
+    !isArrayOf(value.models, isUsageModelKey) ||
+    !isArrayOf(value.imports, isUsageImport) ||
+    !isOptional(value.historyUnavailable, (entry) => entry === true) ||
+    !isArrayOf(value.importedActivity, isUsageImportedActivity) ||
+    !isOptional(value.activityUnavailable, (entry) => entry === true)
+  ) {
+    return false;
+  }
+  if (
+    value.span !== undefined &&
+    (!isRecord(value.span) ||
+      !isFiniteNumber(value.span.startMs) ||
+      !isFiniteNumber(value.span.endMs) ||
+      value.span.endMs < value.span.startMs)
+  ) {
+    return false;
+  }
+  const modelCount = (value.models as UsageModelKey[]).length;
+  return isArrayOf(value.accounts, (entry) => isUsageAccount(entry, modelCount));
+}
+
 export function isHomeSnapshot(value: unknown): value is HomeSnapshot {
   if (
     !isRecord(value) ||
@@ -851,5 +1123,17 @@ export function isImportPreview(value: unknown): value is ImportPreview {
     ) &&
     isKeyMessages(value.issues) &&
     isText(value.expectedRevision)
+  );
+}
+
+/** Counts only: a deleted import is never described by an id, path or row. */
+export function isDeleteImportedHistoryResult(
+  value: unknown,
+): value is DeleteImportedHistoryResult {
+  return (
+    isRecord(value) &&
+    isIntegerBetween(value.invocations, 0, Number.MAX_SAFE_INTEGER) &&
+    isIntegerBetween(value.rateLimitSeries, 0, Number.MAX_SAFE_INTEGER) &&
+    Object.keys(value).length === 2
   );
 }

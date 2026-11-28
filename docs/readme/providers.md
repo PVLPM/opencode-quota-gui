@@ -476,6 +476,24 @@ opencode auth login google-agy
 - With a manual provider list, include `google-agy` in `enabledProviders`.
 - If the login has no project id, set `OPENCODE_AGY_PROJECT_ID`, or `providers.google-agy.settings.projectId` in your user/global `opencode.json(c)` (the OpenCode 1 form `provider.google-agy.options.projectId` also works).
 
+<a id="antigravity-cli"></a>
+
+### Antigravity CLI
+
+Reads the installed official Antigravity CLI's own machine-readable usage command:
+
+```bash
+agy --output-format json -p "/usage"
+```
+
+- Requires `agy` 1.1.11 or newer (`agy --version`). An older build shows an update hint instead of quota. Nothing is installed, signed in to, or opened in a browser.
+- It shows one percentage for each bucket the CLI reports, for example **Gemini Models** weekly and **Claude and GPT models** weekly and five-hour. Each row is keyed by the CLI's own bucket id, so a renamed label never creates a new row.
+- A reset is shown only when the CLI reports a real one; `1970-01-01T00:00:00Z` means no reset is scheduled.
+- Exit code 2 means the CLI has no account quota (for example API-key mode). The card says so rather than reporting a failure.
+- It is a separate card from [Google AGY](#google-agy-quick-setup): the CLI output carries no account identity, so nothing links it to that login. Both cards may appear.
+- It never adds `--disable-slash-commands`; that flag would turn `/usage` into a real prompt that spends quota.
+- With a manual provider list, include `antigravity-cli` in `enabledProviders`.
+
 <a id="gemini-cli"></a>
 
 ### Gemini CLI
@@ -500,6 +518,19 @@ Shows your on-demand account balance from `GET https://api.deepseek.com/user/bal
 - With no valid total balance, it shows the API's availability status. A malformed number becomes a partial-data issue, not zero.
 - Key: `DEEPSEEK_API_KEY`, or `provider.deepseek.options.apiKey` in trusted user/global config (for example `"{env:DEEPSEEK_API_KEY}"`). See [API keys](#api-keys).
 - With a manual provider list, include `deepseek` in `enabledProviders`.
+
+<a id="mistral-vibe"></a>
+
+### Mistral Vibe
+
+Shows your Mistral Vibe subscription allowance from `GET https://api.mistral.ai/v1/billing/budget` and your plan label from `GET https://api.mistral.ai/v1/billing/subscription`. Nothing is installed or signed in to.
+
+- Key sources: `MISTRAL_API_KEY` in your environment, `MISTRAL_API_KEY` in `<VIBE_HOME>/.env` (the Vibe CLI dotenv; `VIBE_HOME` defaults to `~/.vibe`), or a `mistral` API-key login saved in OpenCode 2. The same key found twice stays one card; different keys are separate accounts.
+- **Vibe budget** is the subscription allowance: the reported percentage with used, limit, and remaining in the reported currency (when the platform reports one), plus the exact `reset_at` reset. The platform reports no absolute used value, so used and remaining are derived from the reported percentage and budget.
+- The plan label is display-only: `FREE`, `INDIVIDUAL` (shown as **Pro**), `EDU`, and `TEAM`.
+- **API budget** is a supplementary row shown only when pay-as-you-go billing is enabled; without PAYG it is not a limit you are measured against.
+- A `403` means the credential cannot read this account's usage because the `see_org_inference_usage` permission is missing; the card reports that exact error. `401` means the key was rejected, and `404` means the platform has no billing API.
+- With a manual provider list, include `mistral` in `enabledProviders`.
 
 <a id="nanogpt"></a>
 

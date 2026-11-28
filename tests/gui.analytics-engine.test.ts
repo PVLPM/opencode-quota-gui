@@ -2625,7 +2625,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     await engine.close();
   });
 
-  it("refreshes the session DTO when only the recorded reasoning effort changes", async () => {
+  it("persists a changed recorded reasoning effort and refreshes the session DTO", async () => {
     const db = baseDb();
     const { engine, savedStates, setNow } = harness(db);
     await engine.session("ses_root");
@@ -2648,7 +2648,9 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
 
       const session = await engine.session("ses_root");
       expect(session.steps.find((step) => step.messageId === "msg_b")?.model?.effort).toBe(variant);
-      expect(savedStates.length).toBe(compactWrites);
+      // Effort is part of the compact occurrence now, so a change is persisted.
+      expect(savedStates.length).toBe(compactWrites + index + 1);
+      expect(savedStates.at(-1)?.occurrences.get("msg_b")?.variant).toBe(variant);
     }
     await engine.close();
   });
@@ -4672,6 +4674,129 @@ describe("analytics engine: scoped provider/model lifetime", () => {
     expect(second.totals).toEqual(first.totals);
     await flushAsync();
     expect(calls.slice(baseline).filter((call) => call.method === "withSnapshot")).toHaveLength(1);
+    await engine.close();
+  });
+});
+
+describe("analytics engine: interval activity", () => {
+  it("keeps recorded effort across a warm restart without a source read", async () => {
+    const db = baseDb();
+    db.rows.push(
+      row(
+        "ses_root",
+        "msg_effort_default",
+        NOW - HOUR + 1_000,
+        { input: 500 },
+        {
+          variant: "default",
+        },
+      ),
+      row("ses_root", "msg_effort_high", NOW - HOUR + 2_000, { input: 600 }, { variant: "high" }),
+      row("ses_root", "msg_effort_empty", NOW - HOUR + 3_000, { input: 700 }, { variant: "" }),
+      row("ses_root", "msg_effort_none", NOW - HOUR + 4_000, { input: 800 }),
+    );
+    const first = harness(db);
+    await first.engine.home("24h");
+    await flushAsync();
+    await first.engine.close();
+    const persisted = first.savedStates.at(-1);
+    if (!persisted) throw new Error("expected a persisted state");
+    expect(persisted.occurrences.get("msg_effort_default")?.variant).toBe("default");
+    expect(persisted.occurrences.get("msg_effort_high")?.variant).toBe("high");
+
+    const calls: ReaderCall[] = [];
+    const second = harness(db, {
+      reader: createFakeReader(db, calls),
+      loadSnapshot: async () => structuredClone(persisted),
+    });
+    const result = await second.engine.activity({
+      intervals: [{ startMs: NOW - 2 * HOUR, endMs: NOW }],
+      providerIds: ["openai"],
+    });
+
+    // A warm activity read hydrates the persisted model only.
+    expect(calls).toHaveLength(0);
+    const entries = result.intervals[0]?.entries ?? [];
+    expect(entries.map((entry) => entry.effort)).toEqual(["default", "high", undefined]);
+    expect(
+      entries.find((entry) => entry.effort === "default")?.tokens.input,
+    ).toBeGreaterThanOrEqual(500);
+    expect(entries.find((entry) => entry.effort === "high")?.tokens.input).toBeGreaterThanOrEqual(
+      600,
+    );
+    expect(entries.some((entry) => entry.effort === "")).toBe(false);
+    await second.engine.close();
+  });
+
+  it("reports incomplete activity coverage when the index starts after the interval", async () => {
+    const db = baseDb();
+    const { engine } = harness(db);
+    // The 24h refresh indexes only the last day, so a two-day-old interval was
+    // never read: an empty result there is not evidence of no activity.
+    await engine.home("24h");
+    await flushAsync();
+
+    const result = await engine.activity({
+      intervals: [{ startMs: NOW - 2 * DAY, endMs: NOW - 2 * DAY + HOUR }],
+      providerIds: ["openai"],
+    });
+
+    expect(result.coverage?.complete).toBe(false);
+    await engine.close();
+  });
+
+  it("reports incomplete activity coverage when the index ends before the interval", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.home("24h");
+    await flushAsync();
+    // Two hours later the newest interval reaches past the last indexed sync.
+    setNow(NOW + 2 * HOUR);
+
+    const result = await engine.activity({
+      intervals: [{ startMs: NOW + HOUR, endMs: NOW + HOUR + HOUR / 2 }],
+      providerIds: ["openai"],
+    });
+
+    expect(result.coverage).toMatchObject({ complete: false, stale: true });
+    await engine.close();
+  });
+
+  it("certifies activity coverage for an interval inside the indexed extent", async () => {
+    const db = baseDb();
+    const { engine } = harness(db);
+    await engine.home("24h");
+    await flushAsync();
+
+    const result = await engine.activity({
+      intervals: [{ startMs: NOW - 2 * HOUR, endMs: NOW - HOUR }],
+      providerIds: ["openai"],
+    });
+
+    expect(result.coverage).toEqual({ complete: true, stale: false });
+    expect(result.intervals[0]?.entries.length).toBeGreaterThan(0);
+    await engine.close();
+  });
+
+  it("notifies the host when a refresh only advances the activity coverage", async () => {
+    const db = baseDb();
+    const { engine, setNow, generations } = harness(db);
+    const query = {
+      intervals: [{ startMs: NOW + HOUR, endMs: NOW + HOUR + HOUR / 2 }],
+      providerIds: ["openai"],
+    };
+    await engine.home("24h");
+    await flushAsync();
+    // The first read is answered from an index that ends before the interval,
+    // so its attribution cannot be certified.
+    setNow(NOW + 2 * HOUR);
+    expect((await engine.activity(query)).coverage).toMatchObject({ complete: false });
+    const before = generations.length;
+
+    // The scheduled refresh advances only the extent: no indexed row changes,
+    // yet coverage becomes certified, so the host must be told to re-derive.
+    await vi.waitFor(() => expect(generations.length).toBeGreaterThan(before));
+    expect((await engine.activity(query)).coverage).toEqual({ complete: true, stale: false });
     await engine.close();
   });
 });

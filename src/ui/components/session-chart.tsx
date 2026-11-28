@@ -6,7 +6,12 @@ import {
   DEFAULT_SESSION_SIZE,
   type SessionCompactionTick,
 } from "../chart-geometry";
-import { chartIndexAt, createChartInspection } from "../chart-inspection";
+import {
+  chartIndexAt,
+  createChartInspection,
+  nextInspectionIndex,
+  pointerPlotX,
+} from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
 import {
   axisRangeCaption,
@@ -28,7 +33,7 @@ import {
   stepTimings,
 } from "../session-gaps";
 import { modelTransitions } from "../session-timing";
-import { createChartTooltipLayout } from "../tooltip-layout";
+import { chartTooltipStyle, createChartTooltipLayout } from "../tooltip-layout";
 import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
 import { modelAliasPricingSummary } from "./model-alias-pricing";
 import { ModelIdentityLabel } from "./model-identity";
@@ -216,17 +221,7 @@ export function SessionChart(props: {
     return index === undefined ? 0 : geometry().stepX(index) / size.width;
   });
   /** One style object keeps the Session overlay separate from the shared tooltip. */
-  const tooltipStyle = (): JSX.CSSProperties => {
-    const position = tooltipLayout.position();
-    return {
-      left: `${position.left}px`,
-      top: `${position.top}px`,
-      "min-width": `min(280px, ${position.maxWidth}px)`,
-      "max-width": `${position.maxWidth}px`,
-      "max-height": `${position.maxHeight}px`,
-      visibility: position.visible ? "visible" : "hidden",
-    };
-  };
+  const tooltipStyle = (): JSX.CSSProperties => chartTooltipStyle(tooltipLayout.position());
 
   const formatReuseWords = (rate: number | null): string =>
     rate === null ? SESSION_GAP_LABELS.unavailable : formatPercentExact(rate);
@@ -272,12 +267,9 @@ export function SessionChart(props: {
   };
 
   const pointerAt = (event: PointerEvent) => {
-    const surface = event.currentTarget as HTMLElement | null;
-    if (!surface) return;
-    const rect = surface.getBoundingClientRect();
-    if (!(rect.width > 0)) return;
     const plot = geometry().plot;
-    const x = plot.left + ((event.clientX - rect.left) / rect.width) * plot.width;
+    const x = pointerPlotX(event, plot);
+    if (x === undefined) return;
     inspection.inspectPointer(
       chartIndexAt({
         x,
@@ -289,19 +281,7 @@ export function SessionChart(props: {
   };
 
   const keyAt = (event: KeyboardEvent) => {
-    const count = geometry().stepCount;
-    if (count <= 0) return;
-    const current = active() ?? 0;
-    let next: number | undefined;
-    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      next = Math.min(count - 1, current + 1);
-    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      next = Math.max(0, current - 1);
-    } else if (event.key === "Home") {
-      next = 0;
-    } else if (event.key === "End") {
-      next = count - 1;
-    }
+    const next = nextInspectionIndex(event, geometry().stepCount, active() ?? 0);
     if (next === undefined) return;
     event.preventDefault();
     // Keyboard inspection takes over from a lingering pointer position.

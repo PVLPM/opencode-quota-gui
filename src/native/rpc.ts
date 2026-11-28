@@ -22,6 +22,7 @@ export function createGuiRpcCaller(ctx: Pick<Context, "client">): DashboardRpcCa
   return {
     health: (input, options) => rpc().health(input, options),
     quota: (input, options) => rpc().quota(input, options),
+    usage: (input, options) => rpc().usage(input, options),
     home: (input, options) => rpc().home(input, options),
     groups: (input, options) => rpc().groups(input, options),
     project: (input, options) => rpc().project(input, options),
@@ -32,6 +33,7 @@ export function createGuiRpcCaller(ctx: Pick<Context, "client">): DashboardRpcCa
     importPreview: (input, options) => rpc().importPreview(input, options),
     importApply: (input, options) => rpc().importApply(input, options),
     openSettingsFile: (input, options) => rpc().openSettingsFile(input, options),
+    deleteImportedHistory: (input, options) => rpc().deleteImportedHistory(input, options),
     watch: (input, options) => rpc().watch(input, options),
     events: {
       /**

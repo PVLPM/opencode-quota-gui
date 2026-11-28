@@ -212,6 +212,8 @@ export function groupedPercentWindowEntries(params: {
     window?: {
       percentRemaining: number;
       resetTimeIso?: string;
+      /** Internal provider evidence: provider timestamp vs local now+offset. */
+      resetPrecision?: "exact" | "estimated";
       fixedWindow?: FixedWindowProjectionEvidence;
     };
     suffix: string;
@@ -235,6 +237,7 @@ export function groupedPercentWindowEntries(params: {
         : {}),
       percentRemaining: window.percentRemaining,
       resetTimeIso: window.resetTimeIso,
+      ...(window.resetPrecision ? { resetPrecision: window.resetPrecision } : {}),
       ...(window.fixedWindow ? { fixedWindow: { ...window.fixedWindow } } : {}),
     });
   }

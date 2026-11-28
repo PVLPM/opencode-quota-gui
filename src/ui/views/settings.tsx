@@ -3,6 +3,7 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from
 import { orderCardsByPreference } from "../../contracts/card-order";
 import type {
   DashboardDataSource,
+  DeleteImportedHistoryResult,
   ImportPreview,
   JsonValue,
   SettingsSnapshot,
@@ -13,6 +14,7 @@ import {
   materializeLegacyHiddenRowsForCard,
 } from "../../contracts/row-visibility";
 import type { TemporalStatusSnapshot } from "../../contracts/temporal";
+import type { UsageImportHarness } from "../../contracts/usage";
 import { BuildAbout } from "../components/build-info";
 import { EyeToggle } from "../components/eye-toggle";
 import { GripDotsIcon } from "../components/icons";
@@ -65,6 +67,24 @@ import type { VisibilityCard, VisibilityCatalog, VisibilityRow } from "../visibi
 export type { VisibilityCard, VisibilityCatalog, VisibilityRow } from "../visibility-catalog";
 
 /**
+ * The two opt-in harnesses whose imported history Settings can delete. The
+ * switches stay above; deletion never touches them.
+ */
+const IMPORTED_HISTORY_TARGETS: readonly { harness: UsageImportHarness; label: string }[] = [
+  { harness: "claude-code", label: "Claude Code" },
+  { harness: "codex", label: "Codex" },
+];
+
+function importedHistorySummary(label: string, result: DeleteImportedHistoryResult): string {
+  const invocations = `${result.invocations} imported ${result.invocations === 1 ? "invocation" : "invocations"}`;
+  const windows =
+    result.rateLimitSeries > 0
+      ? ` and ${result.rateLimitSeries} imported quota ${result.rateLimitSeries === 1 ? "window" : "windows"}`
+      : "";
+  return `Deleted ${invocations}${windows} for ${label}.`;
+}
+
+/**
  * Settings (design spec §5.4, §7, §10; R14, R15).
  *
  * Grouped fields with inline validation, an inherited-source note per key, and
@@ -106,6 +126,16 @@ export function SettingsView(props: {
   const [providerText, setProviderText] = createSignal(
     providerSelection(props.snapshot.values.enabledProviders).ids.join(", "),
   );
+  /**
+   * Imported-history deletion is a separate action from the import switches, so
+   * it keeps its own confirmation and outcome state. Nothing here is a draft
+   * edit: a delete applies immediately and never rides the Save bar.
+   */
+  const [deleteConfirm, setDeleteConfirm] = createSignal<UsageImportHarness | undefined>();
+  const [deletingHarness, setDeletingHarness] = createSignal<UsageImportHarness | undefined>();
+  const [deleteOutcomes, setDeleteOutcomes] = createSignal<
+    Partial<Record<UsageImportHarness, { tone: "success" | "error"; message: string }>>
+  >({});
 
   /**
    * The snapshot prop is reactive: a `settings.changed` refresh, a reconnect
@@ -282,6 +312,39 @@ export function SettingsView(props: {
       );
     } finally {
       setBusy(false);
+    }
+  }
+
+  function setDeleteOutcome(
+    harness: UsageImportHarness,
+    outcome: { tone: "success" | "error"; message: string } | undefined,
+  ): void {
+    setDeleteOutcomes((current) => {
+      const next = { ...current };
+      if (outcome === undefined) delete next[harness];
+      else next[harness] = outcome;
+      return next;
+    });
+  }
+
+  /** Confirm-then-delete for one harness; the switches are never written here. */
+  async function deleteImportedHistory(harness: UsageImportHarness): Promise<void> {
+    const remove = props.client.deleteImportedHistory;
+    if (remove === undefined || deletingHarness() !== undefined) return;
+    const label = IMPORTED_HISTORY_TARGETS.find((entry) => entry.harness === harness)?.label ?? "";
+    setDeleteConfirm(undefined);
+    setDeletingHarness(harness);
+    setDeleteOutcome(harness, undefined);
+    try {
+      const result = await remove(harness);
+      setDeleteOutcome(harness, {
+        tone: "success",
+        message: importedHistorySummary(label, result),
+      });
+    } catch (error) {
+      setDeleteOutcome(harness, { tone: "error", message: describeError(error) });
+    } finally {
+      setDeletingHarness(undefined);
     }
   }
 
@@ -791,6 +854,97 @@ export function SettingsView(props: {
     );
   }
 
+  /**
+   * Imported history is removed here, beside its own switch, but it is not a
+   * settings edit: a two-step confirm applies it immediately and reports the
+   * outcome in place. A host that offers no delete seam renders nothing.
+   */
+  function renderImportedHistoryActions(): JSX.Element {
+    const available = () => typeof props.client.deleteImportedHistory === "function";
+    return (
+      <Show when={available()}>
+        <For each={IMPORTED_HISTORY_TARGETS}>
+          {(target) => {
+            const confirming = () => deleteConfirm() === target.harness;
+            const deleting = () => deletingHarness() === target.harness;
+            const outcome = () => deleteOutcomes()[target.harness];
+            return (
+              <div class="qg-field" data-usage-import-delete={target.harness}>
+                <div class="qg-field__text">
+                  <span class="qg-field__label">Imported {target.label} history</span>
+                  <span class="qg-field__meta">
+                    <Show
+                      when={confirming()}
+                      fallback={
+                        <span>
+                          Removes what was imported from local {target.label} transcripts. Quota
+                          history this plugin observed itself is kept.
+                        </span>
+                      }
+                    >
+                      <span>
+                        Delete the imported {target.label} history? This cannot be undone. If the{" "}
+                        {target.label} import is still on, the next refresh imports it again.
+                      </span>
+                    </Show>
+                  </span>
+                  <Show when={outcome()}>
+                    {(entry) => (
+                      <span
+                        class={entry().tone === "error" ? "qg-field__error" : "qg-inherited"}
+                        role={entry().tone === "error" ? "alert" : "status"}
+                      >
+                        {entry().message}
+                      </span>
+                    )}
+                  </Show>
+                </div>
+                <div class="qg-field__control">
+                  <Show
+                    when={confirming()}
+                    fallback={
+                      <Button
+                        variant="danger"
+                        size="small"
+                        disabled={deletingHarness() !== undefined}
+                        aria-label={`Delete imported ${target.label} history`}
+                        onClick={() => {
+                          setDeleteOutcome(target.harness, undefined);
+                          setDeleteConfirm(target.harness);
+                        }}
+                      >
+                        Delete…
+                      </Button>
+                    }
+                  >
+                    <Button
+                      variant="danger"
+                      size="small"
+                      disabled={deletingHarness() !== undefined}
+                      aria-label={`Confirm deleting imported ${target.label} history`}
+                      onClick={() => void deleteImportedHistory(target.harness)}
+                    >
+                      {deleting() ? "Deleting…" : "Delete"}
+                    </Button>
+                    <Button
+                      variant="ghost-muted"
+                      size="small"
+                      disabled={deletingHarness() !== undefined}
+                      aria-label={`Cancel deleting imported ${target.label} history`}
+                      onClick={() => setDeleteConfirm(undefined)}
+                    >
+                      Cancel
+                    </Button>
+                  </Show>
+                </div>
+              </div>
+            );
+          }}
+        </For>
+      </Show>
+    );
+  }
+
   function renderControl(field: SettingsField): JSX.Element {
     const value = () => fieldValue(field);
     const writable = () =>
@@ -1245,28 +1399,31 @@ export function SettingsView(props: {
                     <Show
                       when={group.id === "temporal"}
                       fallback={
-                        <For each={editableFields().filter((field) => field.group === group.id)}>
-                          {(field) => (
-                            <div
-                              class="qg-field"
-                              data-invalid={errorFor(field.key) ? "true" : undefined}
-                            >
-                              <div class="qg-field__text">
-                                <span class="qg-field__label">{field.label}</span>
-                                <span class="qg-field__meta">
-                                  <Show when={field.help}>{(help) => <span>{help()}</span>}</Show>
-                                  <Show when={sourceNote(field.key)}>
-                                    {(note) => <span>{note()}</span>}
+                        <>
+                          <For each={editableFields().filter((field) => field.group === group.id)}>
+                            {(field) => (
+                              <div
+                                class="qg-field"
+                                data-invalid={errorFor(field.key) ? "true" : undefined}
+                              >
+                                <div class="qg-field__text">
+                                  <span class="qg-field__label">{field.label}</span>
+                                  <span class="qg-field__meta">
+                                    <Show when={field.help}>{(help) => <span>{help()}</span>}</Show>
+                                    <Show when={sourceNote(field.key)}>
+                                      {(note) => <span>{note()}</span>}
+                                    </Show>
+                                  </span>
+                                  <Show when={errorFor(field.key)}>
+                                    {(message) => <span class="qg-field__error">{message()}</span>}
                                   </Show>
-                                </span>
-                                <Show when={errorFor(field.key)}>
-                                  {(message) => <span class="qg-field__error">{message()}</span>}
-                                </Show>
+                                </div>
+                                <div class="qg-field__control">{renderControl(field)}</div>
                               </div>
-                              <div class="qg-field__control">{renderControl(field)}</div>
-                            </div>
-                          )}
-                        </For>
+                            )}
+                          </For>
+                          {group.id === "usage-import" ? renderImportedHistoryActions() : undefined}
+                        </>
                       }
                     >
                       {renderTemporalSection()}

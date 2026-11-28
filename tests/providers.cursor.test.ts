@@ -83,6 +83,7 @@ describe("cursor provider", () => {
         group: "Cursor (Pro)",
         percentRemaining: 75,
         resetTimeIso,
+        resetPrecision: "estimated",
         semantic: {
           metric: { kind: "named", name: "API" },
           prominence: "primary",

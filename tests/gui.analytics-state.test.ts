@@ -1,4 +1,5 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -28,6 +29,7 @@ import type {
   OpenCodeRawAssistantRow,
   OpenCodeSourceIdentity,
 } from "../src/lib/opencode-storage.js";
+import { symlinkOrSkip } from "./helpers/symlink-capability.js";
 
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
 
@@ -193,6 +195,7 @@ function withRows(): AnalyticsState {
       messageID: entry.messageID,
       updatedAtMs: 1_700_000_000_000,
       ...(entry.agent === undefined ? {} : { agent: entry.agent }),
+      ...(entry.variant === undefined ? {} : { variant: entry.variant }),
     });
   }
   return state;
@@ -238,6 +241,21 @@ describe("analytics snapshot codec v3", () => {
     expect(decoded?.sourceSignature).toBe("v1|sig-1");
     expect(decoded?.futureCompletionAtMs).toBe(NOW + 3_600_000);
     expect(decoded?.fingerprintIndex.size).toBe(1);
+  });
+
+  it("round-trips recorded effort and keeps unknown distinct from explicit default", () => {
+    const state = withRows();
+    state.occurrences.get(rowKey("ses_parent", "msg_a"))!.variant = "default";
+    state.occurrences.get(rowKey("ses_fork", "msg_a_copy"))!.variant = "high";
+    const persisted = encodeAnalyticsState(state, NOW);
+    const decoded = decodeAnalyticsState(JSON.parse(JSON.stringify(persisted)) as unknown);
+    expect(decoded?.occurrences.get("msg_a")?.variant).toBe("default");
+    expect(decoded?.occurrences.get("msg_a_copy")?.variant).toBe("high");
+
+    const plain = decodeAnalyticsState(
+      JSON.parse(JSON.stringify(encodeAnalyticsState(withRows(), NOW))) as unknown,
+    );
+    expect(plain?.occurrences.get("msg_a")).not.toHaveProperty("variant");
   });
 
   it("never infers a source cursor from wall freshness or cached occurrence times", () => {
@@ -517,6 +535,12 @@ describe("analytics snapshot codec v3", () => {
     expect(
       decodeAnalyticsState({
         ...persisted,
+        occurrences: [[0, "ses", "msg", null, 7]],
+      }),
+    ).toBeUndefined();
+    expect(
+      decodeAnalyticsState({
+        ...persisted,
         presentation: { home: { "24h": { projects: [] } }, project: [] },
       }),
     ).toBeUndefined();
@@ -549,7 +573,7 @@ describe("analytics snapshot codec v3", () => {
     // Same tokens, different telemetry completeness: distinct contributions.
     expect(state.fingerprints).toHaveLength(2);
     const persisted = encodeAnalyticsState(state, NOW);
-    expect(persisted.version).toBe(4);
+    expect(persisted.version).toBe(5);
     const decoded = decodeAnalyticsState(JSON.parse(JSON.stringify(persisted)));
     const rebuilt = [...(decoded?.occurrences.values() ?? [])].map((occurrence) =>
       rowFromFingerprint(decoded!.fingerprints[occurrence.fingerprintIndex]!, occurrence),
@@ -559,7 +583,10 @@ describe("analytics snapshot codec v3", () => {
       cacheReadMissing: true,
       cacheWriteMissing: true,
     });
-    // Old (v3) compact files and 10-field tuples are discarded, so they rebuild.
+    // Old (v3/v4) compact files and 10-field tuples are discarded, so they rebuild.
+    expect(
+      decodeAnalyticsState({ ...JSON.parse(JSON.stringify(persisted)), version: 4 }),
+    ).toBeUndefined();
     expect(
       decodeAnalyticsState({ ...JSON.parse(JSON.stringify(persisted)), version: 3 }),
     ).toBeUndefined();
@@ -747,5 +774,93 @@ describe("analytics presentation store", () => {
     const nonstandard = await loadAnalyticsPresentation(nonstandardPath);
     expect(nonstandard?.home["24h"]?.range).toBe("24h");
     expect(nonstandard?.session).toEqual([]);
+  });
+});
+
+describe("analytics snapshot orphan temp cleanup", () => {
+  /** Well past the one-hour concurrent-writer guard. */
+  const OLD_AGE_MS = 2 * 3_600_000;
+
+  async function writeTempFile(root: string, name: string, ageMs: number): Promise<void> {
+    const path = join(root, name);
+    await writeFile(path, "orphan");
+    const stamp = new Date(Date.now() - ageMs);
+    await utimes(path, stamp, stamp);
+  }
+
+  it("removes old writer temps at load and keeps fresh ones", async () => {
+    const root = await tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    await writeTempFile(root, "analytics-v3.json.12648.r875jq3j49b.tmp", OLD_AGE_MS);
+    await writeTempFile(
+      root,
+      "analytics-v3.json.presentation.json.58080.j7w7uocmmd.tmp",
+      OLD_AGE_MS,
+    );
+    await writeTempFile(root, "analytics-v3.json.58080.j7w7uocmmd.tmp", 0);
+
+    // Cleanup runs even when the snapshot itself is absent.
+    expect(await loadAnalyticsSnapshot(snapshotPath)).toBeUndefined();
+    expect(await readdir(root)).toEqual(["analytics-v3.json.58080.j7w7uocmmd.tmp"]);
+  });
+
+  it("keeps every non-matching name, including other writers' temps and directories", async () => {
+    const root = await tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const keptNames = [
+      "analytics-v3.json",
+      "analytics-v3.json.tmp",
+      "analytics-v3.json.abc.123.tmp",
+      "analytics-v3.json.12648.R875JQ3J.tmp",
+      "analytics-v3.json.tmp-12648-1700000000000-abcd",
+      "analytics-v3.json.12648.r875jq3j49b.tmp.extra",
+      "other.tmp",
+      "usage-history.sqlite",
+      "usage-history.sqlite-wal",
+    ];
+    for (const name of keptNames) await writeFile(join(root, name), "keep");
+    const dirName = "analytics-v3.json.9999.dir0.tmp";
+    await mkdir(join(root, dirName));
+    await writeFile(join(root, dirName, "inner.txt"), "keep");
+
+    await loadAnalyticsSnapshot(snapshotPath);
+
+    expect((await readdir(root)).sort()).toEqual([...keptNames, dirName].sort());
+    expect(await readFile(join(root, dirName, "inner.txt"), "utf8")).toBe("keep");
+  });
+
+  it("does not follow a symlink that matches the temp pattern", async (context) => {
+    const root = await tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const target = join(root, "precious.txt");
+    await writeFile(target, "keep");
+    const old = new Date(Date.now() - OLD_AGE_MS);
+    await utimes(target, old, old);
+    const linkPath = join(root, "analytics-v3.json.12648.r875jq3j49b.tmp");
+    if (!symlinkOrSkip(context, target, linkPath, "file")) return;
+
+    await loadAnalyticsSnapshot(snapshotPath);
+
+    expect(existsSync(linkPath)).toBe(true);
+    expect(await readFile(linkPath, "utf8")).toBe("keep");
+  });
+
+  it("cleans up without disturbing a valid snapshot", async () => {
+    const root = await tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    await saveAnalyticsSnapshot(snapshotPath, withRows(), NOW);
+    await writeTempFile(root, "analytics-v3.json.12648.r875jq3j49b.tmp", OLD_AGE_MS);
+
+    const loaded = await loadAnalyticsSnapshot(snapshotPath);
+    expect(loaded?.occurrences.size).toBe(2);
+    expect(await readdir(root)).toEqual(["analytics-v3.json"]);
+  });
+
+  it("never fails the load when cleanup cannot run", async () => {
+    const root = await tempRoot();
+    await writeFile(join(root, "blocked"), "not a directory");
+    const snapshotPath = join(root, "blocked", "analytics-v3.json");
+
+    await expect(loadAnalyticsSnapshot(snapshotPath)).resolves.toBeUndefined();
   });
 });

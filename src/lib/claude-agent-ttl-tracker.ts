@@ -42,6 +42,8 @@ export function createClaudeAgentTtlTracker(options: {
   directory: string;
   read: (query: ClaudeTranscriptQuery) => Promise<ClaudeObservedTtlResult>;
   emit: (event: TtlEvent, at: number) => void;
+  /** Raw host-native ids; callers hash them before persisting anything. */
+  onNativeIds?: (sessionId: string, messageId: string) => void;
 }) {
   const steps = new Map<string, Step>();
   const newest = new Map<string, string>();
@@ -128,6 +130,11 @@ export function createClaudeAgentTtlTracker(options: {
       const nativeMessage = text(nativeIds?.messageID);
       if (step?.claude && nativeSession !== undefined && nativeMessage !== undefined) {
         step.native = { sessionId: nativeSession, messageId: nativeMessage };
+        try {
+          options.onNativeIds?.(nativeSession, nativeMessage);
+        } catch {
+          // Ownership observation must never break event handling.
+        }
       }
       return;
     }

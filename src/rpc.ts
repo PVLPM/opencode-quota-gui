@@ -17,6 +17,7 @@ import {
 import {
   isAnalyticsGroupSnapshot,
   isDashboardHealth,
+  isDeleteImportedHistoryResult,
   isHomeSnapshot,
   isImportPreview,
   isJsonValue,
@@ -25,8 +26,15 @@ import {
   isSessionSnapshot,
   isSettingsSnapshot,
   isSettingsWriteResult,
+  isUsageSnapshot,
 } from "./contracts/dto-guards.js";
 import { isRangeKey, type RangeKey } from "./contracts/ranges.js";
+import {
+  isUsageImportHarness,
+  isUsageRangeKey,
+  type UsageImportHarness,
+  type UsageQuery,
+} from "./contracts/usage.js";
 import {
   isQuotaDialogCommand,
   type QuotaDialogCommandId,
@@ -199,6 +207,7 @@ export type DashboardRpcSaveVisibilityInput = {
   expectedRevision: string;
 };
 export type DashboardRpcImportApplyInput = { expectedRevision: string };
+export type DashboardRpcDeleteImportedHistoryInput = { harness: UsageImportHarness };
 export type DashboardRpcWatchInput = {
   scope: DashboardRpcViewScope;
   /** Optional for older callers; Native uses it to correlate the source cutover snapshot. */
@@ -488,6 +497,18 @@ export const DashboardRpc = {
       output: output(isQuotaSnapshot),
       errors: DASHBOARD_RPC_ERRORS,
     },
+    usage: {
+      input: schema<UsageQuery>((value) => {
+        if (!isObject(value) || !hasExactKeys(value, ["range"])) {
+          return "input must contain only range";
+        }
+        return isUsageRangeKey(value.range)
+          ? null
+          : "range must be one of current, 24h, 7d, 30d, lifetime";
+      }),
+      output: output(isUsageSnapshot),
+      errors: DASHBOARD_RPC_ERRORS,
+    },
     home: {
       input: schema<{ range: RangeKey; background?: boolean }>((value) => {
         if (
@@ -603,6 +624,16 @@ export const DashboardRpc = {
       output: schema<DashboardRpcOpenSettingsOutput>((value) =>
         isObject(value) && value.opened === true ? null : "output must report opened",
       ),
+      errors: DASHBOARD_RPC_ERRORS,
+    },
+    deleteImportedHistory: {
+      input: schema<DashboardRpcDeleteImportedHistoryInput>((value) => {
+        if (!isObject(value) || !hasExactKeys(value, ["harness"])) {
+          return "input must contain only harness";
+        }
+        return isUsageImportHarness(value.harness) ? null : "harness must be claude-code or codex";
+      }),
+      output: output(isDeleteImportedHistoryResult),
       errors: DASHBOARD_RPC_ERRORS,
     },
     watch: {

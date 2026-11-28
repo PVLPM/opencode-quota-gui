@@ -4,6 +4,7 @@ import {
 } from "../contracts/analytics-entity";
 import type { AnalyticsDimension, AnalyticsEntityIdentity } from "../contracts/dashboard";
 import { DEFAULT_RANGE_KEY, isRangeKey, type RangeKey } from "../contracts/ranges";
+import { isUsageRangeKey, type UsageRangeKey } from "../contracts/usage";
 
 /**
  * History routing and range persistence. Analytics, Models, both group details
@@ -15,6 +16,8 @@ export const RANGE_STORAGE_KEY = "opencode-quota-gui.range";
 
 export type Route =
   | { name: "home" }
+  /** Quota-area observation history; its own range vocabulary, never Analytics RangeKey. */
+  | { name: "usage"; usageRange: UsageRangeKey }
   | { name: "analytics" }
   | { name: "models"; dimension: AnalyticsDimension }
   | { name: "model"; identity: AnalyticsEntityIdentity; modelsGroup?: AnalyticsDimension }
@@ -92,10 +95,17 @@ export function parseLocation(pathWithQuery: string, fallbackRange: RangeKey): L
   const [path = "", query = ""] = pathWithQuery.split("?");
   const params = new URLSearchParams(query);
   const requested = params.get("range");
-  const range: RangeKey = isRangeKey(requested) ? requested : fallbackRange;
+  // Usage owns the `range` query on its own path, so selecting a history range
+  // never rewrites the remembered Analytics range.
+  const isUsagePath = path === "/usage";
+  const range: RangeKey = !isUsagePath && isRangeKey(requested) ? requested : fallbackRange;
   const modelsGroup = readModelsGroup(params.get("group"));
 
   if (path === "/" || path === "/quota") return { route: { name: "home" }, range };
+  if (isUsagePath) {
+    const usageRange: UsageRangeKey = isUsageRangeKey(requested) ? requested : "current";
+    return { route: { name: "usage", usageRange }, range };
+  }
   if (path === "/analytics") {
     return { route: { name: "analytics" }, range };
   }
@@ -151,6 +161,8 @@ export function formatPath(route: Route, range: RangeKey): string {
   switch (route.name) {
     case "home":
       return "/quota";
+    case "usage":
+      return route.usageRange === "current" ? "/usage" : `/usage?range=${route.usageRange}`;
     case "analytics":
       return `/analytics${suffix}`;
     case "models":

@@ -318,12 +318,13 @@ describe("delayed foreground loading", () => {
       (attributes) => /\blabel="([^"]+)"/u.exec(attributes)?.[1] ?? undefined,
     );
     // Five analytics surfaces (analytics home, models, model/provider detail,
-    // projects, sessions) plus the single quota view. Four analytics routes
-    // share the frame's overlay, so the literal count is three.
-    expect(overlays).toHaveLength(3);
+    // projects, sessions) plus the Quota and Usage views. Four analytics routes
+    // share the frame's overlay, so the literal count is four.
+    expect(overlays).toHaveLength(4);
     expect(labels.every((label) => label !== undefined)).toBe(true);
     expect(labels.filter((label) => label === "analytics")).toHaveLength(2);
     expect(labels.filter((label) => label === "quota")).toHaveLength(1);
+    expect(labels.filter((label) => label === "usage")).toHaveLength(1);
     expect(routesSource.match(/<AnalyticsFrame\b/gu)).toHaveLength(4);
   });
 

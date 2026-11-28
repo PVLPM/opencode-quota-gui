@@ -160,7 +160,8 @@ describe("Desktop GUI entry", () => {
   });
 
   it("labels the internal quota tab separately from its host panel", () => {
-    expect(panelSource).toContain('route().name === "home" ? "Quota" : "Dashboard"');
+    expect(panelSource).toContain("QuotaUsageTabs");
+    expect(panelSource).toContain('active={route().name === "usage" ? "usage" : "quota"}');
     expect(panelSource).not.toContain('route().name === "home" ? "Quota & Usage"');
     expect(guiSource).toContain('const DASHBOARD_TAB = { id: TAB_ID, title: "Quota & Usage" }');
     expect(guiSource).toMatch(/mobile:\s*\{\s*title:\s*"Quota & Usage"/u);
@@ -201,8 +202,9 @@ describe("Desktop GUI entry", () => {
     expect(panelSource).toContain("AnalyticsTabs");
     expect(panelSource).toContain("SegmentedControl");
     expect(panelSource).toContain("TemporalStatusStrip");
-    // Quota passes visibility directly; analytics passes it through the shared views.
-    expect(panelSource.match(/enabled=\{props\.visible\}/gu)?.length).toBe(2);
+    // Quota and Usage pass visibility directly; analytics passes it through
+    // the shared views.
+    expect(panelSource.match(/enabled=\{props\.visible\}/gu)?.length).toBe(3);
     expect(routesSource).toContain("function routeEnabled");
     expect(routesSource).toContain("props.enabled?.() !== false");
     for (const [route, count] of [

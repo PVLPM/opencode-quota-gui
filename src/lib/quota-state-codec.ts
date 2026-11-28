@@ -328,10 +328,19 @@ function isQuotaToastEntry(value: unknown, safeText: boolean): value is QuotaToa
   }
   return (
     (value.kind === undefined || value.kind === "percent") &&
-    hasOnlyKeys(value, [...COMMON_ENTRY_KEYS, "percentRemaining", "basis", "fixedWindow"]) &&
+    hasOnlyKeys(value, [
+      ...COMMON_ENTRY_KEYS,
+      "percentRemaining",
+      "basis",
+      "fixedWindow",
+      "resetPrecision",
+    ]) &&
     typeof value.percentRemaining === "number" &&
     Number.isFinite(value.percentRemaining) &&
     (value.basis === undefined || isAccountingPercentageBasis(value.basis, safeText)) &&
+    (value.resetPrecision === undefined ||
+      value.resetPrecision === "exact" ||
+      value.resetPrecision === "estimated") &&
     (value.fixedWindow === undefined ||
       isFixedWindowProjectionEvidence(value.fixedWindow, value.resetTimeIso as string | undefined))
   );

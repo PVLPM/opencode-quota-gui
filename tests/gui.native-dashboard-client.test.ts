@@ -72,6 +72,7 @@ function createFakeCaller() {
       contractVersion: 2,
     })),
     quota: vi.fn(async () => ({ marker: "quota" })),
+    usage: vi.fn(async () => ({ marker: "usage" })),
     home: vi.fn(async () => ({ marker: "home" })),
     groups: vi.fn(async () => ({ marker: "groups" })),
     project: vi.fn(async () => ({ marker: "project" })),
@@ -82,6 +83,7 @@ function createFakeCaller() {
     importPreview: vi.fn(async () => ({ marker: "importPreview" })),
     importApply: vi.fn(async () => ({ marker: "importApply" })),
     openSettingsFile: vi.fn(async () => ({ opened: true as const })),
+    deleteImportedHistory: vi.fn(async () => ({ invocations: 2, rateLimitSeries: 1 })),
     watch: vi.fn(
       (input: { scope: string; attemptNonce?: string }, options?: { signal?: AbortSignal }) =>
         new Promise<{ active: boolean }>((resolve, reject) => {
@@ -683,6 +685,8 @@ describe("native dashboard RPC client", () => {
     await expect(client.quota()).resolves.toEqual({ marker: "quota" });
     await expect(client.quota({ refresh: true })).resolves.toEqual({ marker: "quota" });
     expect(fake.raw.quota).toHaveBeenLastCalledWith({ refresh: true });
+    await expect(client.usage({ range: "7d" })).resolves.toEqual({ marker: "usage" });
+    expect(fake.raw.usage).toHaveBeenLastCalledWith({ range: "7d" });
     await expect(client.home({ range: "7d" })).resolves.toEqual({ marker: "home" });
     await expect(client.groups({ range: "7d", dimension: "model" })).resolves.toEqual({
       marker: "groups",
@@ -704,6 +708,11 @@ describe("native dashboard RPC client", () => {
     });
     await expect(client.openSettingsFile()).resolves.toBeUndefined();
     expect(fake.raw.openSettingsFile).toHaveBeenCalledOnce();
+    await expect(client.deleteImportedHistory("codex")).resolves.toEqual({
+      invocations: 2,
+      rateLimitSeries: 1,
+    });
+    expect(fake.raw.deleteImportedHistory).toHaveBeenCalledWith({ harness: "codex" });
     client.dispose();
   });
 

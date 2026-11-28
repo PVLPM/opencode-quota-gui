@@ -14,6 +14,7 @@ import type {
   SessionSnapshot,
 } from "../contracts/dashboard.js";
 import type { RangeKey } from "../contracts/ranges.js";
+import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import type { PricingSnapshotConfig } from "../lib/types.js";
 
 export const ANALYTICS_WORKER_PROTOCOL_VERSION = 1;
@@ -75,6 +76,7 @@ export type AnalyticsWorkerCommand =
   | { kind: "project"; projectId: string; range: RangeKey }
   | { kind: "session"; sessionId: string }
   | { kind: "groups"; query: AnalyticsGroupQuery }
+  | { kind: "activity"; query: UsageActivityQuery }
   | { kind: "refresh" }
   | { kind: "stats" }
   | { kind: "gc" }
@@ -90,6 +92,7 @@ export type AnalyticsWorkerResult =
   | ProjectSnapshot
   | SessionSnapshot
   | AnalyticsGroupSnapshot
+  | UsageActivityResult
   | AnalyticsWorkerMemoryStats
   | boolean
   | undefined;
@@ -121,6 +124,8 @@ export interface AnalyticsUpkeepNotification {
  */
 export interface AnalyticsTransport extends AnalyticsRangeReader {
   init(options: AnalyticsInitOptions): Promise<void>;
+  /** Internal usage-activity read; host-only, never part of the browser contract. */
+  activity(query: UsageActivityQuery): Promise<UsageActivityResult>;
   /** Optional diagnostics seam; the real worker implements it. */
   stats?(): Promise<AnalyticsWorkerMemoryStats>;
   /** Optional GC seam; returns false when the runtime exposes no hook. */

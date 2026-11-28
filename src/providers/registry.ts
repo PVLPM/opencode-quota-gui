@@ -13,6 +13,7 @@ import {
 import { alibabaCodingPlanProvider } from "./alibaba-coding-plan.js";
 import { alibabaTokenPlanProvider } from "./alibaba-token-plan.js";
 import { anthropicProvider } from "./anthropic.js";
+import { antigravityCliProvider } from "./antigravity-cli.js";
 import { PROVIDER_CACHE_POLICIES } from "./cache-policies.js";
 import { chutesProvider } from "./chutes.js";
 import { claudeAgentProvider } from "./claude-agent.js";
@@ -28,6 +29,7 @@ import {
   minimaxChinaCodingPlanProvider,
   minimaxCodingPlanProvider,
 } from "./minimax-coding-plan.js";
+import { mistralVibeProvider } from "./mistral-vibe.js";
 import { nanoGptProvider } from "./nanogpt.js";
 import { ollamaCloudProvider } from "./ollama-cloud.js";
 import { openaiProvider } from "./openai.js";
@@ -54,6 +56,7 @@ const PROVIDERS_BY_ID = {
   chutes: chutesProvider,
   "google-gemini-cli": googleGeminiCliProvider,
   "google-agy": googleAgyProvider,
+  "antigravity-cli": antigravityCliProvider,
   zai: zaiProvider,
   zhipu: zhipuProvider,
   nanogpt: nanoGptProvider,
@@ -62,6 +65,7 @@ const PROVIDERS_BY_ID = {
   "kimi-code-plan-global": kimiCodePlanGlobalProvider,
   "kimi-code-plan-cn": kimiCodePlanCnProvider,
   deepseek: deepseekProvider,
+  mistral: mistralVibeProvider,
   xai: xaiProvider,
   xiaomi: xiaomiProvider,
   "opencode-go": opencodeGoProvider,

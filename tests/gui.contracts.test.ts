@@ -2,8 +2,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { buildSyntheticUsageSnapshot } from "../scripts/fixtures/synthetic-usage.mjs";
 import { DASHBOARD_CONTRACT_VERSION, type SessionNode } from "../src/contracts/dashboard.js";
-import { isHomeSnapshot, isQuotaSnapshot } from "../src/contracts/dto-guards.js";
+import { isHomeSnapshot, isQuotaSnapshot, isUsageSnapshot } from "../src/contracts/dto-guards.js";
 import {
   DASHBOARD_EVENT_TOPICS,
   isCostedTokens,
@@ -20,6 +21,9 @@ import {
   rangeBucketUnit,
   rangeWindow,
 } from "../src/contracts/ranges.js";
+import { isUsageRangeKey, USAGE_RANGE_KEYS } from "../src/contracts/usage.js";
+import { isUsageActivityQuery } from "../src/contracts/usage-activity.js";
+import { parseUsageSnapshot } from "../src/ui/dashboard-client.js";
 import { homeSnapshot } from "./fixtures/gui-ui-fixtures.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
@@ -53,6 +57,15 @@ describe("GUI contract range vocabulary", () => {
     expect(isRangeKey("LIFETIME")).toBe(false);
     expect(isRangeKey(null)).toBe(false);
     expect(isRangeKey(24)).toBe(false);
+  });
+
+  it("keeps the Usage range vocabulary separate from Analytics", () => {
+    expect(USAGE_RANGE_KEYS).toEqual(["current", "24h", "7d", "30d", "lifetime"]);
+    expect(USAGE_RANGE_KEYS.every((key) => isUsageRangeKey(key))).toBe(true);
+    expect(isUsageRangeKey("current")).toBe(true);
+    expect(isUsageRangeKey("1d")).toBe(false);
+    expect(isUsageRangeKey("Lifetime")).toBe(false);
+    expect(isUsageRangeKey(undefined)).toBe(false);
   });
 
   it("builds exact rolling windows [now - duration, now)", () => {
@@ -163,6 +176,61 @@ describe("GUI contract range vocabulary", () => {
   });
 });
 
+describe("usage activity query contract", () => {
+  const providerIds = ["openai"];
+
+  it("accepts sorted non-overlapping half-open intervals", () => {
+    expect(
+      isUsageActivityQuery({
+        intervals: [
+          { startMs: 0, endMs: 10 },
+          { startMs: 10, endMs: 20 },
+        ],
+        providerIds,
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects overlapping, unsorted, degenerate, and non-finite intervals", () => {
+    expect(
+      isUsageActivityQuery({
+        intervals: [
+          { startMs: 0, endMs: 10 },
+          { startMs: 9, endMs: 20 },
+        ],
+        providerIds,
+      }),
+    ).toBe(false);
+    expect(
+      isUsageActivityQuery({
+        intervals: [
+          { startMs: 10, endMs: 20 },
+          { startMs: 0, endMs: 10 },
+        ],
+        providerIds,
+      }),
+    ).toBe(false);
+    expect(isUsageActivityQuery({ intervals: [{ startMs: 10, endMs: 10 }], providerIds })).toBe(
+      false,
+    );
+    expect(
+      isUsageActivityQuery({
+        intervals: [{ startMs: Number.POSITIVE_INFINITY, endMs: 10 }],
+        providerIds,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects empty or non-string runtime provider ids", () => {
+    expect(isUsageActivityQuery({ intervals: [{ startMs: 0, endMs: 1 }], providerIds: [""] })).toBe(
+      false,
+    );
+    expect(isUsageActivityQuery({ intervals: [{ startMs: 0, endMs: 1 }], providerIds: [1] })).toBe(
+      false,
+    );
+  });
+});
+
 describe("GUI contract guards", () => {
   const stack = { input: 10, cacheRead: 3, cacheWrite: 4, output: 5, reasoning: 2 };
   const costed = {
@@ -256,6 +324,94 @@ describe("GUI contract guards", () => {
         providers: { ...quota.providers, cards: [{ ...card, stale: false }] },
       }),
     ).toBe(false);
+  });
+
+  it("accepts the synthetic usage history and rejects malformed windows", () => {
+    const snapshot = buildSyntheticUsageSnapshot({ range: "7d", nowMs: NOW });
+    expect(isUsageSnapshot(snapshot)).toBe(true);
+
+    expect(
+      isUsageSnapshot({
+        ...snapshot,
+        accounts: [
+          {
+            ...snapshot.accounts[0],
+            windows: [{ ...snapshot.accounts[0].windows[0], points: [] }],
+          },
+        ],
+      }),
+    ).toBe(false);
+
+    const account = snapshot.accounts[0];
+    const window = account.windows[0];
+    expect(
+      isUsageSnapshot({
+        ...snapshot,
+        accounts: [
+          {
+            ...account,
+            windows: [
+              {
+                ...window,
+                intervals: [
+                  {
+                    ...window.intervals[0],
+                    activity: [{ ...window.intervals[0].activity[0], model: 99 }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toBe(false);
+
+    expect(isUsageSnapshot({ ...snapshot, range: "90d" })).toBe(false);
+    expect(isUsageSnapshot({ ...snapshot, accounts: "nope" })).toBe(false);
+    expect(isUsageSnapshot({ ...snapshot, models: [{ providerId: "openai" }] })).toBe(false);
+    expect(
+      isUsageSnapshot({
+        ...snapshot,
+        importedActivity: [{ ...snapshot.importedActivity[0], harness: "other" }],
+      }),
+    ).toBe(false);
+    expect(
+      isUsageSnapshot({
+        ...snapshot,
+        importedActivity: [{ ...snapshot.importedActivity[0], totals: { input: 1 } }],
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps guard and HTTP parser parity for imported activity", () => {
+    const snapshot = buildSyntheticUsageSnapshot({ range: "7d", nowMs: NOW });
+    const imported = snapshot.importedActivity[0]!;
+    const model = imported.models[0]!;
+    const reversed = {
+      ...snapshot,
+      importedActivity: [{ ...imported, span: { startMs: NOW, endMs: NOW - 1 } }],
+    };
+    const estimated = {
+      ...snapshot,
+      importedActivity: [
+        {
+          ...imported,
+          models: [
+            {
+              ...model,
+              estimatedBurnPercentPoints: 5,
+              efforts: [{ ...model.efforts[0]!, estimatedBurnPercentPoints: 5 }],
+            },
+          ],
+        },
+      ],
+    };
+    for (const payload of [reversed, estimated]) {
+      expect(isUsageSnapshot(payload)).toBe(false);
+      expect(() => parseUsageSnapshot(payload)).toThrow();
+    }
+    expect(isUsageSnapshot(snapshot)).toBe(true);
+    expect(() => parseUsageSnapshot(snapshot)).not.toThrow();
   });
 
   it("freezes contract version 2 for the required timeZone payload fields", () => {

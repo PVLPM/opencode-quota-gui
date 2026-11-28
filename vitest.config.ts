@@ -9,10 +9,13 @@ const DOM_TESTS = [
   "tests/gui.native-controls-dom.test.ts",
   "tests/gui.runway-dom.test.ts",
   "tests/gui.runway-web-dom.test.ts",
+  "tests/gui.usage-dom.test.ts",
+  "tests/gui.usage-tabs.test.ts",
   "tests/gui.native-compatibility-runtime.test.ts",
   "tests/gui.native-cache-composer-pill.test.ts",
   "tests/gui.model-alias-tooltip-dom.test.ts",
   "tests/gui.model-alias-surfaces.test.ts",
+  "tests/gui.settings-usage-import-dom.test.ts",
 ];
 const SOLID_DEV = fileURLToPath(new URL("./node_modules/solid-js/dist/dev.js", import.meta.url));
 const SOLID_WEB_DEV = fileURLToPath(

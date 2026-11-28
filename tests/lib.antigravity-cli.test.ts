@@ -1,0 +1,653 @@
+/**
+ * Antigravity CLI (`agy`) usage reader.
+ *
+ * Every read is served by an injected process runner, and the default runner is
+ * exercised only against a mocked `node:child_process`. No test starts the real
+ * `agy` binary or touches a real account.
+ */
+
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it, vi } from "vitest";
+
+import { symlinkOrSkip } from "./helpers/symlink-capability.js";
+
+const execFileMock = vi.hoisted(() => ({ execFile: vi.fn() }));
+
+vi.mock("node:child_process", () => ({ execFile: execFileMock.execFile }));
+
+import {
+  AGY_FAILURE_MESSAGES,
+  AGY_MINIMUM_VERSION,
+  AGY_USAGE_ARGS,
+  AGY_VERSION_ARGS,
+  type AgyProcessRequest,
+  type AgyProcessResult,
+  type AgyProcessRunner,
+  compareAgyVersions,
+  parseAgyResetTimeIso,
+  parseAgyVersion,
+  readAgyUsage,
+  resolveAgyBinaryPath,
+  runAgyProcess,
+} from "../src/lib/antigravity-cli.js";
+
+/** The documented usage envelope; it contains no account identifiers. */
+const SUCCESS_ENVELOPE = {
+  status: "SUCCESS",
+  response: "Usage windows for your account.",
+  command: {
+    name: "usage",
+    data: {
+      description: "Usage limits for the signed-in account.",
+      groups: [
+        {
+          name: "Gemini Models",
+          description: "Models within this group: Gemini",
+          buckets: [
+            {
+              id: "gemini-weekly",
+              name: "Weekly Limit Remaining",
+              window: "weekly",
+              remaining_fraction: 1,
+              reset_time: "2026-12-04T21:40:30Z",
+            },
+          ],
+        },
+        {
+          name: "Claude and GPT models",
+          description: "Models within this group: Claude, GPT",
+          buckets: [
+            {
+              id: "3p-weekly",
+              name: "Weekly Limit Remaining",
+              window: "weekly",
+              remaining_fraction: 1,
+              reset_time: "1970-01-01T00:00:00Z",
+            },
+            {
+              id: "3p-5h",
+              name: "Five Hour Limit Remaining",
+              window: "5h",
+              remaining_fraction: 1,
+              reset_time: "1970-01-01T00:00:00Z",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  usage: { input_tokens: 0, output_tokens: 0 },
+};
+
+function result(overrides: Partial<AgyProcessResult> = {}): AgyProcessResult {
+  return { code: 0, stdout: "", stderr: "", timedOut: false, ...overrides };
+}
+
+/**
+ * Text a real `agy` failure can quote: the signed-in address, a private path and
+ * a credential-shaped token. No reader error may repeat any part of it.
+ */
+const LEAKY_EMAIL = "person@example.com";
+const LEAKY_PATH = "/home/person/.config/agy/credentials.json";
+const LEAKY_TOKEN = "ya29.a0AfH6SMBsecret-token-value";
+const LEAKY_CLI_TEXT = `${LEAKY_EMAIL} ${LEAKY_PATH} ${LEAKY_TOKEN}`;
+
+function expectNoCliTextLeak(message: string): void {
+  for (const fragment of [LEAKY_EMAIL, LEAKY_PATH, LEAKY_TOKEN, "/home/person", ".config"]) {
+    expect(message).not.toContain(fragment);
+  }
+}
+
+/** Serve the version probe, then the usage read, recording every request. */
+function runnerStub(params: { version?: AgyProcessResult; usage?: AgyProcessResult }): {
+  runner: AgyProcessRunner;
+  requests: AgyProcessRequest[];
+} {
+  const requests: AgyProcessRequest[] = [];
+  const runner: AgyProcessRunner = async (request) => {
+    requests.push(request);
+    if (request.args === AGY_VERSION_ARGS) return params.version ?? result({ stdout: "1.5.18\n" });
+    return params.usage ?? result({ stdout: JSON.stringify(SUCCESS_ENVELOPE) });
+  };
+  return { runner, requests };
+}
+
+const BINARY = "/fixtures/agy";
+
+describe("agy version gate", () => {
+  it("parses a bare semver and compares against the minimum", () => {
+    expect(parseAgyVersion("1.5.18")).toEqual({ major: 1, minor: 5, patch: 18 });
+    expect(parseAgyVersion("v1.1.11\n")).toEqual({ major: 1, minor: 1, patch: 11 });
+    expect(parseAgyVersion("1.5.18-beta.1")).toEqual({ major: 1, minor: 5, patch: 18 });
+    expect(parseAgyVersion("1.5")).toBeUndefined();
+    expect(parseAgyVersion("agy 1.5.18")).toBeUndefined();
+    expect(parseAgyVersion("")).toBeUndefined();
+
+    const minimum = parseAgyVersion(AGY_MINIMUM_VERSION);
+    expect(minimum).toBeDefined();
+    if (!minimum) return;
+    expect(compareAgyVersions(parseAgyVersion("1.5.18")!, minimum)).toBeGreaterThan(0);
+    expect(compareAgyVersions(parseAgyVersion("1.1.11")!, minimum)).toBe(0);
+    expect(compareAgyVersions(parseAgyVersion("1.1.10")!, minimum)).toBeLessThan(0);
+    expect(compareAgyVersions(parseAgyVersion("1.0.99")!, minimum)).toBeLessThan(0);
+  });
+
+  it("reports an unsupported version and makes no further call", async () => {
+    const { runner, requests } = runnerStub({ version: result({ stdout: "1.1.10\n" }) });
+
+    const read = await readAgyUsage({ runner, binaryPath: BINARY });
+
+    expect(read).toEqual({ state: "unsupported-version", version: "1.1.10" });
+    expect(requests.map((request) => request.args)).toEqual([AGY_VERSION_ARGS]);
+  });
+
+  it("reports an unparsable version and makes no further call", async () => {
+    const { runner, requests } = runnerStub({ version: result({ stdout: "unknown build" }) });
+
+    const read = await readAgyUsage({ runner, binaryPath: BINARY });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toContain("cannot parse");
+    expect(read.failureCategory).toBe("local");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("reports a failed version probe as fixed text without quoting its stderr", async () => {
+    const { runner, requests } = runnerStub({
+      version: result({ code: 1, stderr: LEAKY_CLI_TEXT }),
+    });
+
+    const read = await readAgyUsage({ runner, binaryPath: BINARY });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe(AGY_FAILURE_MESSAGES.versionProbeFailed);
+    expectNoCliTextLeak(read.message);
+    expect(read.failureCategory).toBe("local");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("reports a missing binary without a version probe", async () => {
+    const { runner, requests } = runnerStub({});
+    const read = await readAgyUsage({
+      runner,
+      platform: "linux",
+      env: { PATH: "/definitely/not/here" },
+      isExecutableFile: async () => false,
+    });
+
+    expect(read).toEqual({ state: "not-installed" });
+    expect(requests).toEqual([]);
+  });
+});
+
+describe("agy usage envelope", () => {
+  it("reads only the trusted command and keys every bucket by its provider id", async () => {
+    const { runner, requests } = runnerStub({});
+
+    const read = await readAgyUsage({ runner, binaryPath: BINARY });
+
+    expect(requests).toHaveLength(2);
+    // The supported read is exactly the documented machine-readable slash command.
+    expect(requests[1]?.args).toEqual(AGY_USAGE_ARGS);
+    expect(requests[1]?.args).not.toContain("--disable-slash-commands");
+    expect(requests[1]?.file).toBe(BINARY);
+
+    expect(read.state).toBe("ok");
+    if (read.state !== "ok") return;
+    expect(read.buckets.map((bucket) => bucket.bucketId)).toEqual([
+      "gemini-weekly",
+      "3p-weekly",
+      "3p-5h",
+    ]);
+    expect(read.buckets.map((bucket) => bucket.label)).toEqual(["Weekly", "Weekly", "5h"]);
+    expect(read.buckets.map((bucket) => bucket.groupName)).toEqual([
+      "Gemini Models",
+      "Claude and GPT models",
+      "Claude and GPT models",
+    ]);
+    expect(read.buckets.map((bucket) => bucket.percentRemaining)).toEqual([100, 100, 100]);
+    // Epoch zero means "no reset scheduled", never a past reset.
+    expect(read.buckets.map((bucket) => bucket.resetTimeIso)).toEqual([
+      "2026-12-04T21:40:30.000Z",
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it("keeps the reported fraction and skips a bucket without one", async () => {
+    const envelope = structuredClone(SUCCESS_ENVELOPE);
+    envelope.command.data.groups[0]!.buckets[0]!.remaining_fraction = 0.42;
+    envelope.command.data.groups[1]!.buckets.push({
+      id: "3p-monthly",
+      name: "Monthly Limit Remaining",
+      window: "monthly",
+      // No remaining_fraction: nothing to report.
+      reset_time: "2026-12-04T21:40:30Z",
+    } as unknown as (typeof envelope.command.data.groups)[1]["buckets"][number]);
+
+    const read = await readAgyUsage({
+      runner: runnerStub({ usage: result({ stdout: JSON.stringify(envelope) }) }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("ok");
+    if (read.state !== "ok") return;
+    expect(read.buckets.map((bucket) => bucket.bucketId)).toEqual([
+      "gemini-weekly",
+      "3p-weekly",
+      "3p-5h",
+    ]);
+    expect(read.buckets[0]?.percentRemaining).toBeCloseTo(42, 5);
+  });
+
+  it("skips a bucket that has no provider id instead of keying it by its label", async () => {
+    const envelope = structuredClone(SUCCESS_ENVELOPE);
+    envelope.command.data.groups[0]!.buckets.push({
+      name: "Weekly Limit Remaining",
+      window: "weekly",
+      remaining_fraction: 0.5,
+      reset_time: "2026-12-04T21:40:30Z",
+    } as unknown as (typeof envelope.command.data.groups)[0]["buckets"][number]);
+
+    const read = await readAgyUsage({
+      runner: runnerStub({ usage: result({ stdout: JSON.stringify(envelope) }) }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("ok");
+    if (read.state !== "ok") return;
+    expect(read.buckets.map((bucket) => bucket.bucketId)).toEqual([
+      "gemini-weekly",
+      "3p-weekly",
+      "3p-5h",
+    ]);
+  });
+
+  it("reports no quota when the CLI succeeded but lists no reportable bucket", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({
+        usage: result({
+          stdout: JSON.stringify({
+            status: "SUCCESS",
+            command: { name: "usage", data: { groups: [] } },
+          }),
+        }),
+      }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read).toEqual({ state: "no-quota" });
+  });
+});
+
+describe("agy failure states", () => {
+  it("reports a status ERROR envelope as fixed text and echoes none of its output", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({
+        usage: result({
+          stdout: JSON.stringify({
+            status: "ERROR",
+            error: `quota backend rejected ${LEAKY_CLI_TEXT}`,
+          }),
+          stderr: LEAKY_CLI_TEXT,
+        }),
+      }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe(AGY_FAILURE_MESSAGES.usageEnvelopeFailed);
+    expect(read.message).not.toContain("quota backend");
+    expectNoCliTextLeak(read.message);
+  });
+
+  it("reports a different command as fixed text instead of quoting its name", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({
+        usage: result({
+          stdout: JSON.stringify({ status: "SUCCESS", command: { name: LEAKY_EMAIL } }),
+        }),
+      }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe(AGY_FAILURE_MESSAGES.usageDifferentCommand);
+    expectNoCliTextLeak(read.message);
+  });
+
+  it("reports exit 2 as a no-quota state, not a crash", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({ usage: result({ code: 2, stderr: "no account quota" }) }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read).toEqual({ state: "no-quota" });
+  });
+
+  it("maps exit 1 to a fixed message without quoting the JSON error or stderr", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({
+        usage: result({
+          code: 1,
+          stdout: JSON.stringify({ error: `model not available for ${LEAKY_CLI_TEXT}` }),
+          stderr: LEAKY_CLI_TEXT,
+        }),
+      }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe(AGY_FAILURE_MESSAGES.usageFailed);
+    expect(read.message).not.toContain("model not available");
+    expectNoCliTextLeak(read.message);
+    expect(read.failureCategory).toBe("provider_api");
+    expect(read.exitCode).toBe(1);
+  });
+
+  it("reports a child that never started as a fixed message", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({
+        usage: result({ code: null, stderr: LEAKY_CLI_TEXT, spawnErrorCode: "ENOENT" }),
+      }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe(AGY_FAILURE_MESSAGES.spawnFailed);
+    expect(read.message).not.toContain("ENOENT");
+    expectNoCliTextLeak(read.message);
+    expect(read.failureCategory).toBe("local");
+    expect(read.exitCode).toBeUndefined();
+  });
+
+  it("reports an unexpected exit code as a bounded number and nothing else", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({ usage: result({ code: 4, stderr: LEAKY_CLI_TEXT }) }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe("Antigravity CLI exited with code 4.");
+    expectNoCliTextLeak(read.message);
+    expect(read.exitCode).toBe(4);
+  });
+
+  it("treats exit 3 as a failure after partial output", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({ usage: result({ code: 3 }) }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toContain("exit 3");
+    expect(read.failureCategory).toBe("provider_api");
+  });
+
+  it("reports a timeout as a local failure", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({ usage: result({ timedOut: true }) }).runner,
+      binaryPath: BINARY,
+      usageTimeoutMs: 30_000,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toContain("timed out after 30s");
+    expect(read.failureCategory).toBe("local");
+  });
+
+  it("treats a missing command name after a model turn as spent quota", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({
+        usage: result({
+          stdout: JSON.stringify({
+            status: "SUCCESS",
+            response: "Here is your usage summary.",
+            num_turns: 2,
+          }),
+        }),
+      }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toContain("may have spent quota");
+    // Our own guard is not a provider verdict, so it never carries a category.
+    expect(read.failureCategory).toBeUndefined();
+  });
+
+  it("treats a conversation id as proof that a model turn ran", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({
+        usage: result({
+          stdout: JSON.stringify({ status: "SUCCESS", conversation_id: "conv-1" }),
+        }),
+      }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toContain("may have spent quota");
+  });
+
+  it("reports unparsable output as an error", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({ usage: result({ stdout: "not json" }) }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe("Antigravity CLI returned unparsable output.");
+    expect(read.failureCategory).toBeUndefined();
+  });
+});
+
+describe("agy reset normalization", () => {
+  it("treats epoch zero and unparsable values as no reset", () => {
+    expect(parseAgyResetTimeIso("1970-01-01T00:00:00Z")).toBeUndefined();
+    expect(parseAgyResetTimeIso("not-a-date")).toBeUndefined();
+    expect(parseAgyResetTimeIso(undefined)).toBeUndefined();
+    expect(parseAgyResetTimeIso("2026-12-04T21:40:30Z")).toBe("2026-12-04T21:40:30.000Z");
+  });
+});
+
+describe("agy binary resolution", () => {
+  it("finds agy on PATH", async () => {
+    const found = await resolveAgyBinaryPath({
+      platform: "win32",
+      env: { PATH: "C:\\Tools;C:\\Other" },
+      isExecutableFile: async (candidate) => candidate === "C:\\Other\\agy.exe",
+    });
+
+    expect(found).toBe("C:\\Other\\agy.exe");
+  });
+
+  it("falls back to the Windows installer location when PATH misses it", async () => {
+    const found = await resolveAgyBinaryPath({
+      platform: "win32",
+      env: { PATH: "C:\\Tools", LOCALAPPDATA: "C:\\Users\\fixture\\AppData\\Local" },
+      isExecutableFile: async (candidate) =>
+        candidate === "C:\\Users\\fixture\\AppData\\Local\\agy\\bin\\agy.exe",
+    });
+
+    expect(found).toBe("C:\\Users\\fixture\\AppData\\Local\\agy\\bin\\agy.exe");
+  });
+
+  it("returns null when no candidate is a file", async () => {
+    const found = await resolveAgyBinaryPath({
+      platform: "linux",
+      env: { PATH: "/usr/local/bin:/usr/bin" },
+      isExecutableFile: async () => false,
+    });
+
+    expect(found).toBeNull();
+  });
+
+  it("skips empty and relative PATH entries instead of resolving them from the cwd", async () => {
+    const seen: string[] = [];
+    const found = await resolveAgyBinaryPath({
+      platform: "linux",
+      env: { PATH: "::.:relative/bin:/opt/agy/bin:" },
+      isExecutableFile: async (candidate) => {
+        seen.push(candidate);
+        return candidate === "/opt/agy/bin/agy";
+      },
+    });
+
+    expect(found).toBe("/opt/agy/bin/agy");
+    expect(seen).toEqual(["/opt/agy/bin/agy"]);
+  });
+
+  it("finds nothing when every PATH entry is relative or empty", async () => {
+    const found = await resolveAgyBinaryPath({
+      platform: "linux",
+      env: { PATH: ":.:relative/bin:./bin" },
+      isExecutableFile: async () => true,
+    });
+
+    expect(found).toBeNull();
+  });
+
+  it("skips a relative Windows PATH entry", async () => {
+    const seen: string[] = [];
+    const found = await resolveAgyBinaryPath({
+      platform: "win32",
+      env: { PATH: '"relative\\tools";;C:\\Tools' },
+      isExecutableFile: async (candidate) => {
+        seen.push(candidate);
+        return candidate === "C:\\Tools\\agy.exe";
+      },
+    });
+
+    expect(found).toBe("C:\\Tools\\agy.exe");
+    expect(seen).toEqual(["C:\\Tools\\agy.exe"]);
+  });
+});
+
+describe("agy binary resolution against filesystem fixtures", () => {
+  const tempRoots: string[] = [];
+
+  async function makeTempDir(prefix: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), prefix));
+    tempRoots.push(dir);
+    return dir;
+  }
+
+  afterAll(async () => {
+    await Promise.all(tempRoots.map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  /** Writes a placeholder executable; on POSIX it also carries the execute bit. */
+  async function writeExecutable(path: string): Promise<void> {
+    await writeFile(path, "#!/bin/sh\nexit 0\n", { encoding: "utf8" });
+    if (process.platform !== "win32") await chmod(path, 0o755);
+  }
+
+  it("resolves a symlink to an executable target", async (context) => {
+    const dir = await makeTempDir("agy-resolve-link-");
+    const target = join(dir, "agy-real");
+    await writeExecutable(target);
+    const linkName = process.platform === "win32" ? "agy.exe" : "agy";
+    const link = join(dir, linkName);
+    if (!symlinkOrSkip(context, target, link)) return;
+
+    const found = await resolveAgyBinaryPath({
+      platform: process.platform,
+      env: { PATH: dir },
+    });
+
+    expect(found).toBe(link);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "skips a non-executable file and finds the executable in a later PATH entry",
+    async () => {
+      const first = await makeTempDir("agy-resolve-noexec-");
+      const second = await makeTempDir("agy-resolve-exec-");
+      await writeFile(join(first, "agy"), "not executable", { encoding: "utf8" });
+      const executable = join(second, "agy");
+      await writeExecutable(executable);
+
+      const found = await resolveAgyBinaryPath({
+        platform: process.platform,
+        env: { PATH: `${first}:${second}` },
+      });
+
+      expect(found).toBe(executable);
+    },
+  );
+
+  it("skips a directory named agy", async () => {
+    const dir = await makeTempDir("agy-resolve-dir-");
+    const dirName = process.platform === "win32" ? "agy.exe" : "agy";
+    await mkdir(join(dir, dirName), { recursive: true });
+
+    const found = await resolveAgyBinaryPath({
+      platform: process.platform,
+      env: { PATH: dir },
+    });
+
+    expect(found).toBeNull();
+  });
+});
+
+describe("agy default runner", () => {
+  it("spawns a hidden, shellless child with a timeout", async () => {
+    execFileMock.execFile.mockImplementation(
+      (
+        _file: string,
+        _args: string[],
+        _options: unknown,
+        callback: (error: null, stdout: string, stderr: string) => void,
+      ) => {
+        callback(null, "1.5.18\n", "");
+      },
+    );
+
+    const read = await runAgyProcess({ file: BINARY, args: AGY_USAGE_ARGS, timeoutMs: 30_000 });
+
+    expect(read).toEqual({ code: 0, stdout: "1.5.18\n", stderr: "", timedOut: false });
+    expect(execFileMock.execFile).toHaveBeenCalledWith(
+      BINARY,
+      ["--output-format", "json", "-p", "/usage"],
+      expect.objectContaining({ timeout: 30_000, windowsHide: true, shell: false }),
+      expect.any(Function),
+    );
+  });
+
+  it("keeps a failed exit code instead of throwing", async () => {
+    execFileMock.execFile.mockImplementation(
+      (
+        _file: string,
+        _args: string[],
+        _options: unknown,
+        callback: (
+          error: Error & { code?: number; killed?: boolean },
+          stdout: string,
+          stderr: string,
+        ) => void,
+      ) => {
+        callback(Object.assign(new Error("Command failed"), { code: 2 }), "", "no account");
+      },
+    );
+
+    const read = await runAgyProcess({ file: BINARY, args: AGY_USAGE_ARGS, timeoutMs: 1_000 });
+
+    expect(read.code).toBe(2);
+    expect(read.timedOut).toBe(false);
+  });
+});

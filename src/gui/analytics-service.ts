@@ -16,6 +16,11 @@ import type {
   SessionSnapshot,
 } from "../contracts/dashboard.js";
 import { isRangeKey, type RangeKey } from "../contracts/ranges.js";
+import {
+  isUsageActivityQuery,
+  type UsageActivityQuery,
+  type UsageActivityResult,
+} from "../contracts/usage-activity.js";
 import type { PricingSnapshotConfig } from "../lib/types.js";
 import { createAnalyticsBridge } from "./analytics-bridge.js";
 import {
@@ -32,6 +37,8 @@ export interface AnalyticsReadService {
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
   /** One range-certified grouped model/provider read. */
   groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
+  /** Internal usage-activity read for the host-built Usage view. */
+  activity(query: UsageActivityQuery): Promise<UsageActivityResult>;
   /** Coalesced forced refresh (optional in the spec; always present here). */
   refresh(): Promise<void>;
   /** Worker-side memory sample (benchmark/diagnostics; optional transport seam). */
@@ -228,6 +235,11 @@ export function createAnalyticsReadService(
     async groups(query) {
       if (!isAnalyticsGroupQuery(query)) throw badRequest();
       return (await ensureTransport()).groups(query);
+    },
+
+    async activity(query) {
+      if (!isUsageActivityQuery(query)) throw badRequest();
+      return (await ensureTransport()).activity(query);
     },
 
     async refresh() {

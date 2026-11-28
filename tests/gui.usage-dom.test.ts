@@ -1,0 +1,302 @@
+import { createComponent } from "solid-js";
+import { render } from "solid-js/web";
+import { afterEach, describe, expect, it } from "vitest";
+import { buildSyntheticUsageSnapshot } from "../scripts/fixtures/synthetic-usage.mjs";
+import type { UsageSnapshot } from "../src/contracts/usage";
+import { UsageView } from "../src/ui/views/usage";
+import { HOUR_MS, percentRow, providerCard } from "./fixtures/gui-ui-fixtures";
+
+/**
+ * Usage is a Quota-area view: one card per account, every quota window stacked
+ * full-width, one focusable inspection surface per chart, and a collapsible
+ * model-first breakdown with an explicit Unattributed row.
+ */
+
+const NOW = Date.UTC(2026, 10, 27, 12, 0, 0);
+const SNAPSHOT = buildSyntheticUsageSnapshot({ range: "7d", nowMs: NOW });
+
+function mount(
+  mode: "used" | "remaining",
+  options: {
+    snapshot?: UsageSnapshot;
+    cards?: Parameters<typeof UsageView>[0]["cards"];
+    cardsStale?: boolean;
+  } = {},
+) {
+  const target = document.createElement("div");
+  document.body.append(target);
+  const dispose = render(
+    () =>
+      createComponent(UsageView, {
+        snapshot: options.snapshot ?? SNAPSHOT,
+        preferences: { percentMode: mode, detailed: false },
+        ...(options.cards === undefined ? {} : { cards: options.cards }),
+        ...(options.cardsStale === undefined ? {} : { cardsStale: options.cardsStale }),
+      }),
+    target,
+  );
+  return { target, dispose };
+}
+
+afterEach(() => {
+  document.body.replaceChildren();
+});
+
+describe("Usage view DOM", () => {
+  it("renders one account card and one full-width window chart per quota window", () => {
+    const { target, dispose } = mount("remaining");
+
+    expect(target.querySelectorAll("article.qg-usage-account")).toHaveLength(3);
+    expect(target.querySelectorAll(".qg-usage-window")).toHaveLength(6);
+    // Every window chart is a direct row of its account, never a side-by-side grid.
+    for (const account of target.querySelectorAll(".qg-usage-account__windows")) {
+      for (const child of account.children) {
+        expect(child.classList.contains("qg-usage-window")).toBe(true);
+      }
+    }
+    expect(target.textContent).toContain("5h limit");
+    expect(target.textContent).toContain("Weekly");
+    expect(target.textContent).toContain("Fable weekly");
+    expect(target.textContent).toContain("Unknown effort");
+    expect(target.textContent).toContain("Default effort (recorded)");
+
+    dispose();
+  });
+
+  it("shows one caveat trigger, seated in the first account header", () => {
+    const { target, dispose } = mount("remaining");
+
+    const triggers = target.querySelectorAll(".qg-usage-info");
+    expect(triggers).toHaveLength(1);
+    const firstCard = target.querySelector("article.qg-usage-account");
+    expect(firstCard?.querySelector(".qg-card__head .qg-usage-info")).not.toBeNull();
+    expect(triggers[0]?.textContent).toContain("About usage history");
+
+    dispose();
+  });
+
+  it("draws the loaded quota card's runway as a dashed projection, never a stored point", () => {
+    const snapshot = buildSyntheticUsageSnapshot({ range: "current", nowMs: NOW });
+    const card = providerCard({
+      cardId: "synthetic-openai-work" as never,
+      rows: [
+        percentRow({
+          rowId: "five_hour" as never,
+          resetAtIso: new Date(NOW + 3 * HOUR_MS).toISOString(),
+          runway: {
+            kind: "before_reset",
+            projectedAtIso: new Date(NOW + 2 * HOUR_MS).toISOString(),
+          },
+        }),
+      ],
+    });
+
+    const withRunway = mount("remaining", { snapshot, cards: [card] });
+    expect(withRunway.target.querySelectorAll(".qg-usage-chart__projection")).toHaveLength(1);
+    expect(withRunway.target.querySelectorAll(".qg-usage-chart__latest").length).toBeGreaterThan(0);
+    withRunway.dispose();
+
+    // A stale quota payload suppresses the projection exactly as the cards do.
+    const stale = mount("remaining", { snapshot, cards: [card], cardsStale: true });
+    expect(stale.target.querySelectorAll(".qg-usage-chart__projection")).toHaveLength(0);
+    stale.dispose();
+  });
+
+  it("marks unobserved gaps dashed, boundaries disconnected and missing history banded", () => {
+    const { target, dispose } = mount("remaining");
+
+    expect(target.querySelectorAll(".qg-usage-chart__gap").length).toBeGreaterThan(0);
+    expect(target.querySelectorAll(".qg-usage-chart__boundary").length).toBeGreaterThan(0);
+    expect(target.querySelectorAll(".qg-usage-chart__unavailable").length).toBeGreaterThan(0);
+    expect(target.querySelectorAll(".qg-usage-chart__line").length).toBeGreaterThan(0);
+
+    dispose();
+  });
+
+  it("flips Remaining to Used only at render time", () => {
+    const remaining = mount("remaining");
+    const remainingSurface = remaining.target.querySelector<HTMLElement>(".qg-chart__surface");
+    expect(remainingSurface).not.toBeNull();
+    remainingSurface?.focus();
+    expect(remainingSurface?.getAttribute("aria-valuetext")).toContain("Remaining");
+    expect(remainingSurface?.getAttribute("aria-valuetext")).toContain("82.00%");
+    remaining.dispose();
+
+    const used = mount("used");
+    const usedSurface = used.target.querySelector<HTMLElement>(".qg-chart__surface");
+    usedSurface?.focus();
+    expect(usedSurface?.getAttribute("aria-valuetext")).toContain("Used");
+    expect(usedSurface?.getAttribute("aria-valuetext")).toContain("18.00%");
+    expect(used.target.textContent).toContain("Used");
+    used.dispose();
+  });
+
+  it("steps through intervals with the keyboard and exposes the compact tooltip", async () => {
+    const { target, dispose } = mount("remaining");
+    const surface = target.querySelector<HTMLElement>(".qg-chart__surface");
+    expect(surface).not.toBeNull();
+    surface?.focus();
+    await Promise.resolve();
+
+    const initial = surface?.getAttribute("aria-valuetext");
+    expect(initial).toContain("Observed");
+    const tooltip = target.querySelector(".qg-usage-chart__tooltip");
+    expect(tooltip).not.toBeNull();
+    expect(tooltip?.textContent).toContain("Remaining");
+    expect(tooltip?.textContent).toContain("%");
+
+    surface?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await Promise.resolve();
+    expect(surface?.getAttribute("aria-valuetext")).not.toBe(initial);
+    expect(surface?.getAttribute("aria-valuetext")).toContain("Monitoring gap");
+    expect(target.querySelector(".qg-usage-chart__tooltip")?.textContent).toContain(
+      "Monitoring gap",
+    );
+
+    surface?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    await Promise.resolve();
+    expect(surface?.getAttribute("aria-valuenow")).toBe(surface?.getAttribute("aria-valuemax"));
+
+    dispose();
+  });
+
+  it("snaps the crosshair onto the latest dot, even from a pointer past it", async () => {
+    const { target, dispose } = mount("remaining");
+    const window = target.querySelector<HTMLElement>(".qg-usage-window");
+    const surface = window?.querySelector<HTMLElement>(".qg-chart__surface");
+    const latest = window?.querySelector(".qg-usage-chart__latest");
+    // The top grid line spans the plot, so the axis labels stay the only gutter.
+    const grid = window?.querySelector(".qg-chart__grid-line");
+    const plotLeft = Number(grid?.getAttribute("x1"));
+    const plotRight = Number(grid?.getAttribute("x2"));
+    const dotX = Number(latest?.getAttribute("cx"));
+    expect(Number.isFinite(dotX)).toBe(true);
+
+    if (surface) {
+      // happy-dom has no layout: give the surface the plot's own box.
+      surface.getBoundingClientRect = () => ({
+        left: 0,
+        top: 0,
+        right: plotRight - plotLeft,
+        bottom: 100,
+        width: plotRight - plotLeft,
+        height: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+      // The pointer sits just past the newest reading: the nearest inspectable
+      // anchor is still that reading, so the crosshair lands on its dot.
+      surface.dispatchEvent(
+        new PointerEvent("pointermove", { clientX: dotX - plotLeft + 6, bubbles: true }),
+      );
+    }
+    await Promise.resolve();
+
+    const cursor = window?.querySelector(".qg-chart__cursor");
+    const active = window?.querySelector(".qg-usage-chart__active-point");
+    expect(cursor?.getAttribute("x1")).toBe(latest?.getAttribute("cx"));
+    expect(active?.getAttribute("cx")).toBe(latest?.getAttribute("cx"));
+    expect(active?.getAttribute("cy")).toBe(latest?.getAttribute("cy"));
+
+    // The keyboard reaches the same dot: End is the last measured instant.
+    surface?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    await Promise.resolve();
+    expect(window?.querySelector(".qg-chart__cursor")?.getAttribute("x1")).toBe(
+      latest?.getAttribute("cx"),
+    );
+
+    dispose();
+  });
+
+  it("shows a short reset reason, including when the provider time is unknown", async () => {
+    const { target, dispose } = mount("remaining");
+    const surfaces = target.querySelectorAll<HTMLElement>(".qg-chart__surface");
+
+    // Account 0 window 1 proves the reset time; account 1 window 0 does not.
+    const precise = surfaces[1];
+    precise?.focus();
+    precise?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await Promise.resolve();
+    const preciseTooltip = precise
+      ?.closest(".qg-usage-window")
+      ?.querySelector(".qg-usage-chart__tooltip")?.textContent;
+    expect(preciseTooltip).toContain("Reset");
+    expect(preciseTooltip).not.toContain("Reset time unknown");
+
+    const unknown = surfaces[2];
+    unknown?.focus();
+    unknown?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await Promise.resolve();
+    expect(
+      unknown?.closest(".qg-usage-window")?.querySelector(".qg-usage-chart__tooltip")?.textContent,
+    ).toContain("Reset time unknown");
+
+    dispose();
+  });
+
+  it("renders imported harness activity as its own labelled section", () => {
+    const { target, dispose } = mount("remaining");
+
+    const sections = target.querySelectorAll(".qg-usage-imported");
+    expect(sections).toHaveLength(2);
+    expect(sections[0]?.getAttribute("aria-label")).toContain(
+      "Imported from Claude Code — recorded activity, not attributed to quota",
+    );
+    expect(sections[1]?.getAttribute("aria-label")).toContain(
+      "Imported from Codex — recorded activity, not attributed to quota",
+    );
+    expect(target.textContent).toContain("Claude Code");
+    expect(target.textContent).toContain("Codex");
+    expect(target.textContent).toContain("imported");
+    expect(sections[0]?.textContent).toContain("claude-sonnet-4-5");
+    expect(sections[0]?.textContent).toContain("API-equivalent");
+    expect(sections[1]?.textContent).toContain("gpt-5.2-codex");
+    expect(sections[1]?.textContent).toContain("high");
+
+    // Imported sections sit after every quota account card, outside their charts.
+    const cards = [...target.querySelectorAll(".qg-usage-account")];
+    expect(cards.some((card) => card.querySelector(".qg-usage-imported"))).toBe(false);
+
+    dispose();
+  });
+
+  it("expands the model breakdown, switches quota windows and keeps Unattributed explicit", async () => {
+    const { target, dispose } = mount("remaining");
+    const breakdown = target.querySelector<HTMLDetailsElement>(
+      ".qg-usage-account .qg-usage-breakdown",
+    );
+    expect(breakdown).not.toBeNull();
+    if (breakdown) breakdown.open = true;
+    await Promise.resolve();
+
+    expect(breakdown?.querySelectorAll(".qg-usage-breakdown__model")).toHaveLength(2);
+    expect(breakdown?.textContent).toContain("Unknown effort");
+    expect(breakdown?.textContent).toContain("Default effort (recorded)");
+    expect(breakdown?.textContent).toContain("estimated");
+    expect(breakdown?.textContent).toContain("tokens");
+
+    const select = breakdown?.querySelector<HTMLSelectElement>("select");
+    expect(select?.value).toBe("five_hour");
+    expect(select?.querySelectorAll("option")).toHaveLength(2);
+    const coverage = breakdown?.querySelector(".qg-usage-breakdown__coverage")?.textContent;
+    expect(coverage).toContain("53% observed");
+
+    if (select) {
+      select.value = "weekly";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await Promise.resolve();
+    expect(select?.value).toBe("weekly");
+    expect(breakdown?.querySelector(".qg-usage-breakdown__coverage")?.textContent).toContain(
+      "38% observed",
+    );
+
+    const unattributed = breakdown?.querySelector(".qg-usage-breakdown__unattributed");
+    expect(unattributed?.textContent).toContain("Unattributed");
+    expect(unattributed?.textContent).toContain("7.00 pp");
+    expect(unattributed?.textContent).toContain("zero API-equivalent weight");
+
+    dispose();
+  });
+});

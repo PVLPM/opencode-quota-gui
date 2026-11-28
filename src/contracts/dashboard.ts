@@ -4,6 +4,7 @@ import type { BankedResetAvailability } from "./openai-quota.js";
 import type { ProviderFailureCategory, QuotaAttemptOutcome } from "./provider-failure.js";
 import type { BucketUnit, RangeKey, RangeWindow } from "./ranges.js";
 import type { TemporalStatusSnapshot } from "./temporal.js";
+import type { UsageImportHarness, UsageQuery, UsageSnapshot } from "./usage.js";
 
 /**
  * Frozen GUI contracts (design spec §5.1–§5.4).
@@ -627,6 +628,27 @@ export interface ImportPreview {
   expectedRevision: string;
 }
 
+/**
+ * How much imported history one deletion removed. Only counts cross the wire:
+ * an imported row holds hashes and counters, never anything a caller may read
+ * back.
+ */
+export interface DeleteImportedHistoryResult {
+  /** Stored invocations removed for the harness. */
+  invocations: number;
+  /** Imported Codex rate-limit series removed; always 0 for Claude Code. */
+  rateLimitSeries: number;
+}
+
+/**
+ * Host seam for the per-harness imported-history delete (`UsageRecorder`
+ * satisfies it). Transports hold only this interface, so the delete never
+ * reaches the store around the importer's single-flight.
+ */
+export interface ImportedHistoryDeleter {
+  deleteImportedHistory(harness: UsageImportHarness): Promise<DeleteImportedHistoryResult>;
+}
+
 export type DashboardEventTopic = "quota.changed" | "sessions.changed" | "settings.changed";
 
 export interface DashboardEvent {
@@ -640,6 +662,11 @@ export interface DashboardDataSource {
   health(): Promise<DashboardHealth>;
   home(input: { range: RangeKey; exact?: boolean; background?: boolean }): Promise<HomeSnapshot>;
   quota(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
+  /**
+   * Local observation history (v1.4.0). A read never performs a provider
+   * request; it is served from the stored history the existing poll captured.
+   */
+  usage(input: UsageQuery): Promise<UsageSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
   /** Range-certified grouped model/provider analytics (one exact query). */
@@ -661,6 +688,12 @@ export interface DashboardDataSource {
    * the OS default application. No arguments, no caller path.
    */
   openSettingsFile?(): Promise<void>;
+  /**
+   * Optional additive seam: delete one harness's imported history from the
+   * plugin's private usage store. It never changes the import switches, and a
+   * harness that is still enabled re-imports on its next opportunity.
+   */
+  deleteImportedHistory?(harness: UsageImportHarness): Promise<DeleteImportedHistoryResult>;
   subscribe(onEvent: (event: DashboardEvent) => void): () => void;
 }
 

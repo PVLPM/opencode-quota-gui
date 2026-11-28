@@ -214,6 +214,17 @@ const FIXTURES = {
     percent({ resultType: "quota", window: "month" }),
     value({ resultType: "balance", component: "remaining_credits" }),
   ],
+  mistral: [
+    percent({ resultType: "budget", named: "Vibe budget" }),
+    percent({ resultType: "budget", named: "API budget" }),
+  ],
+  // The CLI's rows carry its own bucket ids as explicit row keys, and only the
+  // buckets the signed-in account has are reported.
+  "antigravity-cli": [
+    percent({ resultType: "quota", rowKey: "named:gemini-weekly" }),
+    percent({ resultType: "quota", rowKey: "named:3p-weekly" }),
+    percent({ resultType: "quota", rowKey: "named:3p-5h" }),
+  ],
 } satisfies Record<string, QuotaToastEntry[]>;
 
 describe("provider optional Visibility declarations", () => {

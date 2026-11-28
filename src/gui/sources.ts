@@ -26,12 +26,15 @@ import type {
   DashboardDataSource,
   HomeSnapshot,
   ProjectSnapshot,
+  ProviderCard,
   QuotaSnapshot,
   SessionSnapshot,
 } from "../contracts/dashboard.js";
 import { OPENAI_RESETS_ROW_KEY, OPENAI_RESETS_ROW_RESULT_TYPE } from "../contracts/openai-quota.js";
 import { isTransientProviderFailureCategory } from "../contracts/provider-failure.js";
 import type { RangeKey } from "../contracts/ranges.js";
+import type { UsageQuery, UsageSnapshot } from "../contracts/usage.js";
+import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import { createLoadConfigMeta, loadConfig } from "../lib/config.js";
 import type { QuotaProvider, QuotaProviderContext, QuotaToastEntry } from "../lib/entries.js";
 import { rawAssistantRowHasTokenUsage } from "../lib/opencode-storage.js";
@@ -39,7 +42,7 @@ import {
   collectQuotaDashboardProviderResults,
   type QuotaStatusLiveProbe,
 } from "../lib/quota-render-data.js";
-import { withoutClaudeAgentSavedResets } from "../lib/quota-state.js";
+import { quotaResultMeasuredAtMs, withoutClaudeAgentSavedResets } from "../lib/quota-state.js";
 import type { QuotaToastConfig } from "../lib/types.js";
 import { getProviders } from "../providers/registry.js";
 import {
@@ -51,7 +54,12 @@ import {
 } from "./aggregation.js";
 import { createAnalyticsModel } from "./analytics-model.js";
 import { type AnalyticsReadService, createAnalyticsReadService } from "./analytics-service.js";
-import { buildCardId, hashQuotaCardIdentity } from "./identity.js";
+import {
+  buildCardId,
+  buildProviderScopeCardId,
+  hashQuotaCardIdentity,
+  rowIdForEntry,
+} from "./identity.js";
 import {
   buildProviderCards,
   cardSourceKey,
@@ -61,7 +69,8 @@ import {
   type SourceKey,
   UNSCOPED,
 } from "./provider-cards.js";
-import { markQuotaObservationLive } from "./quota-observation.js";
+import { markQuotaObservationCycle, markQuotaObservationLive } from "./quota-observation.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "./snapshot-service.js";
 import { TEMPORAL_QUOTA_POLICIES } from "./temporal-quota-policy-data.js";
 import {
   buildTemporalStatus,
@@ -69,6 +78,8 @@ import {
   readBundledTemporalCatalog,
 } from "./temporal-status.js";
 import { resolveHostTimeZone } from "./time-zone.js";
+import type { UsageImportStatus } from "./usage-import-service.js";
+import { createUsageSnapshotBuilder } from "./usage-service.js";
 
 /**
  * Controlled source error codes the HTTP layer maps to status codes
@@ -128,12 +139,25 @@ export interface DashboardReadSourceOptions {
   /** Test/embedding seam for the provider registry; defaults to `getProviders()`. */
   providers?: QuotaProvider[];
   providerLabel?: (providerId: string) => string;
+  /** Test/embedding seam: the same usage-history path the recorder writes. */
+  usageStorePath?: string;
+  /** Recorder import seams; absent reports imports disabled. */
+  usageImportStatus?: () => Promise<UsageImportStatus[]>;
+  usageImportedActivity?: (query: UsageActivityQuery) => Promise<UsageActivityResult>;
 }
 
 export type DashboardReadSource = Pick<
   DashboardDataSource,
   "home" | "quota" | "project" | "session" | "groups"
 > & {
+  /** Host-only usage-activity read; never added to the browser DashboardDataSource. */
+  activity(query: UsageActivityQuery): Promise<UsageActivityResult>;
+  /**
+   * Optional local observation-history read. This workstream types only the
+   * seam: the producing backend lands separately, so an absent implementation
+   * answers exactly like an absent quota read (a controlled unavailable error).
+   */
+  usage?: DashboardDataSource["usage"];
   /** One shared analytics refresh per transport tick, if the service loaded. */
   refreshAnalytics?(): Promise<void>;
   /** Worker background-generation notifications (lazy; never starts analytics). */
@@ -271,6 +295,92 @@ function cardPreferences(config: QuotaToastConfig): ProviderCardPreferences {
   return preferences;
 }
 
+/** Per-row evidence the card projection intentionally drops (never a DTO field). */
+interface RowMeasurementEvidence {
+  providerId: string;
+  limitKey?: string;
+  resetPrecision?: "exact" | "estimated";
+}
+
+/**
+ * Recover reset precision and percent-row capacity from the provider entries
+ * before `buildProviderCards` reduces them to display rows. The row id is the
+ * same identity the card projection emits, so the recorder can attach the
+ * evidence to the stored sample without provider-id string matching.
+ */
+function rowMeasurementEvidence(
+  probes: readonly MergedProbe[],
+  cards: readonly ProviderCard[],
+): {
+  resetPrecisionByRow?: Map<string, "exact" | "estimated">;
+  capacityKeyByRow?: Map<string, string>;
+} {
+  const rows = new Map<string, RowMeasurementEvidence>();
+  for (const probe of probes) {
+    const accounts = probe.result.accounts ?? [];
+    const accountIds = new Set(accounts.map((account) => account.sourceId));
+    const cardIdBySource = new Map(
+      accounts.map((account) => [
+        account.sourceId,
+        buildCardId(
+          probe.providerId,
+          account.identityKey?.trim() ? account.identityKey : account.sourceId,
+        ),
+      ]),
+    );
+    const providerScopeCardId = buildProviderScopeCardId(probe.providerId);
+    for (const entry of probe.result.entries) {
+      const sourceId = entry.accounting.sourceId;
+      const cardId =
+        sourceId !== undefined && accountIds.has(sourceId)
+          ? (cardIdBySource.get(sourceId) ?? providerScopeCardId)
+          : providerScopeCardId;
+      const rowId = rowIdForEntry(cardId, entry);
+      const limit = "basis" in entry ? entry.basis?.limit?.quantity : undefined;
+      const limitKey =
+        limit !== undefined ? `limit:${limit.decimal}:${JSON.stringify(limit.unit)}` : undefined;
+      const resetPrecision =
+        "resetPrecision" in entry && entry.resetPrecision !== undefined
+          ? entry.resetPrecision
+          : undefined;
+      rows.set(rowId, {
+        providerId: probe.providerId,
+        ...(limitKey !== undefined ? { limitKey } : {}),
+        ...(resetPrecision !== undefined ? { resetPrecision } : {}),
+      });
+    }
+  }
+
+  // A plan change is an identity change even when capacity is unchanged. The
+  // hash is persisted; the display label itself is never stored.
+  const planKeyByCard = new Map<string, string>();
+  for (const card of cards) {
+    if (card.planLabel === undefined) continue;
+    planKeyByCard.set(
+      card.cardId,
+      `plan:${hashQuotaCardIdentity(card.providerId, card.planLabel)}`,
+    );
+  }
+
+  const resetPrecisionByRow = new Map<string, "exact" | "estimated">();
+  const capacityKeyByRow = new Map<string, string>();
+  for (const [rowId, evidence] of rows) {
+    if (evidence.resetPrecision !== undefined) {
+      resetPrecisionByRow.set(rowId, evidence.resetPrecision);
+    }
+    const cardId = rowId.slice(0, rowId.indexOf("#"));
+    const parts = [
+      ...(evidence.limitKey !== undefined ? [evidence.limitKey] : []),
+      ...(planKeyByCard.get(cardId) !== undefined ? [planKeyByCard.get(cardId) as string] : []),
+    ];
+    if (parts.length > 0) capacityKeyByRow.set(rowId, parts.join("|"));
+  }
+  return {
+    ...(resetPrecisionByRow.size > 0 ? { resetPrecisionByRow } : {}),
+    ...(capacityKeyByRow.size > 0 ? { capacityKeyByRow } : {}),
+  };
+}
+
 export function createDashboardReadSource(
   options: DashboardReadSourceOptions,
 ): DashboardReadSource {
@@ -322,6 +432,15 @@ export function createDashboardReadSource(
         .map((row) => ({ sessionId: row.sessionID, atMs: messagePositionMs(row) })),
     });
 
+    /** Fresh legacy model over the in-memory dataset; shared by groups/activity. */
+    const loadLegacyModel = async () => {
+      const dataset = await loadDataset();
+      const model = createAnalyticsModel({ timeZone });
+      model.setMetadata(dataset.sessions, dataset.projects);
+      model.apply(dataset.messages, []);
+      return model;
+    };
+
     return {
       async home({ range }) {
         const analytics = createAnalytics(usageDataset(await loadDataset()));
@@ -356,11 +475,16 @@ export function createDashboardReadSource(
         }
       },
       async groups(query) {
-        const dataset = await loadDataset();
-        const model = createAnalyticsModel({ timeZone });
-        model.setMetadata(dataset.sessions, dataset.projects);
-        model.apply(dataset.messages, []);
-        return model.groups(query, now());
+        return (await loadLegacyModel()).groups(query, now());
+      },
+      async activity(query) {
+        // The legacy model is rebuilt from the whole in-memory dataset per
+        // request, so it read every activity the source can offer: the queried
+        // intervals are certified rather than merely unpruned.
+        return {
+          ...(await loadLegacyModel()).activity(query),
+          coverage: { complete: true, stale: false },
+        };
       },
       // The in-memory dataset is rebuilt per request; there is no worker.
       async refresh() {},
@@ -636,6 +760,38 @@ export function createDashboardReadSource(
       };
       const temporal = temporalStatusForCards(cards, nowMs);
       if (temporal) snapshot.temporal = temporal;
+      // Genuine measurement identity per card, never part of the DTO: the
+      // provider's own accounting time when supplied, else the fetch/cache
+      // timestamp propagated through `fetchQuotaProviderResult`.
+      const measuredAtByProvider = new Map<string, number>();
+      for (const probe of probes) {
+        const measuredAt = quotaResultMeasuredAtMs(probe.result);
+        if (measuredAt !== undefined) measuredAtByProvider.set(probe.providerId, measuredAt);
+      }
+      const measuredAtByCard = new Map<string, number>();
+      for (const card of cards) {
+        const observedAtMs =
+          card.observedAtIso === undefined ? undefined : Date.parse(card.observedAtIso);
+        const measuredAt =
+          observedAtMs !== undefined && Number.isFinite(observedAtMs)
+            ? observedAtMs
+            : measuredAtByProvider.get(card.providerId);
+        if (measuredAt !== undefined) measuredAtByCard.set(card.cardId, measuredAt);
+      }
+      const configuredInterval = config.minIntervalMs;
+      const evidence = rowMeasurementEvidence(merged.probes, cards);
+      markQuotaObservationCycle(snapshot, {
+        measuredAtByCard,
+        attemptedAtMs: nowMs,
+        ...evidence,
+        intervalMs:
+          typeof configuredInterval === "number" &&
+          Number.isFinite(configuredInterval) &&
+          configuredInterval > 0
+            ? configuredInterval
+            : DEFAULT_POLL_INTERVAL_MS,
+        providerIds: selected.map((provider) => provider.id),
+      });
       lastQuotaSnapshot = snapshot;
       return markQuotaObservationLive(snapshot);
     } catch (error) {
@@ -710,6 +866,28 @@ export function createDashboardReadSource(
     return (await getAnalyticsService()).groups(query);
   }
 
+  async function activity(query: UsageActivityQuery): Promise<UsageActivityResult> {
+    return (await getAnalyticsService()).activity(query);
+  }
+
+  const usageSnapshots = createUsageSnapshotBuilder({
+    ...(options.usageStorePath !== undefined ? { path: options.usageStorePath } : {}),
+    // Only a real usage request starts the analytics worker (via `activity`),
+    // never provider polling or a refresh of the source database.
+    activity: (query) => activity(query),
+    ...(options.usageImportStatus !== undefined ? { importStatus: options.usageImportStatus } : {}),
+    ...(options.usageImportedActivity !== undefined
+      ? { importedActivity: options.usageImportedActivity }
+      : {}),
+    now,
+    timeZone,
+    latestQuotaCards: () => lastQuotaSnapshot?.providers.cards,
+  });
+
+  async function usage(input: UsageQuery): Promise<UsageSnapshot> {
+    return usageSnapshots.usage(input);
+  }
+
   async function refreshAnalytics(): Promise<void> {
     // A quota-only dashboard never loaded analytics, so never start the worker.
     if (!analyticsPromise) return;
@@ -746,5 +924,16 @@ export function createDashboardReadSource(
     await service?.close?.();
   }
 
-  return { home, quota, project, session, groups, refreshAnalytics, subscribeAnalytics, close };
+  return {
+    home,
+    quota,
+    project,
+    session,
+    groups,
+    activity,
+    usage,
+    refreshAnalytics,
+    subscribeAnalytics,
+    close,
+  };
 }

@@ -173,6 +173,14 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
       authority: "provider_reported",
     },
   ],
+  "antigravity-cli": [
+    {
+      resultType: "quota",
+      acquisitionMethod: "local_cli",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
+  ],
   zai: [
     {
       resultType: "quota",
@@ -244,6 +252,14 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
     },
     {
       resultType: "status",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
+  ],
+  mistral: [
+    {
+      resultType: "budget",
       acquisitionMethod: "remote_api",
       ownership: "maintained",
       authority: "provider_reported",

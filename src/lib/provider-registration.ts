@@ -1,4 +1,14 @@
 import {
+  MISTRAL_VIBE_API_BUDGET_INFO,
+  MISTRAL_VIBE_API_BUDGET_LABEL,
+  MISTRAL_VIBE_API_BUDGET_ROW_KEY,
+  MISTRAL_VIBE_BUDGET_INFO,
+  MISTRAL_VIBE_BUDGET_LABEL,
+  MISTRAL_VIBE_BUDGET_ROW_KEY,
+  MISTRAL_VIBE_ROW_KIND,
+  MISTRAL_VIBE_ROW_RESULT_TYPE,
+} from "../contracts/mistral-vibe-quota.js";
+import {
   CLAUDE_AGENT_RESETS_INFO,
   CLAUDE_AGENT_RESETS_ROW_KEY,
   OPENAI_CREDITS_INFO,
@@ -97,6 +107,12 @@ export interface QuotaProviderRegistrationSourceEntry {
   runtimeIds: readonly string[];
   synonyms: readonly string[];
   liveLocalUsage?: true;
+  /**
+   * The source reports no account identity, so two of its measurements can
+   * never be proven to belong to the same account: Usage keeps every
+   * observation but never reads a drop between two of them as consumption.
+   */
+  usageAccountContinuity?: "unconfirmed";
   shape: QuotaProviderShapeSource;
 }
 
@@ -500,6 +516,49 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
     },
   },
   {
+    id: "antigravity-cli",
+    label: "Antigravity CLI",
+    // The CLI owns no OpenCode runtime id: its quota belongs to the Antigravity
+    // harness, and nothing proves it serves an OpenCode provider.
+    runtimeIds: [],
+    synonyms: ["agy", "antigravity"],
+    // `agy /usage` names no account and exposes no account-change signal; a
+    // login switch would otherwise splice two subscriptions into one series.
+    usageAccountContinuity: "unconfirmed",
+    shape: {
+      autoSetup: "manual_env_config",
+      authentication: "local_cli_auth",
+      quota: "local_cli_report",
+      notes:
+        "Runs the installed Antigravity CLI's own /usage command (agy >= 1.1.11); no install, login or browser step",
+      // Each window is optional: the CLI only reports the buckets this account
+      // has, and the declared row keys are its own bucket ids.
+      optionalVisibilityRows: [
+        {
+          rowKey: "named:gemini-weekly",
+          resultType: "quota",
+          kind: "percent",
+          label: "Weekly",
+          info: "Antigravity CLI Gemini Models weekly window, when the CLI reports it.",
+        },
+        {
+          rowKey: "named:3p-weekly",
+          resultType: "quota",
+          kind: "percent",
+          label: "Weekly",
+          info: "Antigravity CLI Claude and GPT models weekly window, when the CLI reports it.",
+        },
+        {
+          rowKey: "named:3p-5h",
+          resultType: "quota",
+          kind: "percent",
+          label: "5h",
+          info: "Antigravity CLI Claude and GPT models five-hour window, when the CLI reports it.",
+        },
+      ],
+    },
+  },
+  {
     id: "zai",
     label: "Z.ai",
     runtimeIds: ["zai", "glm", "zai-coding-plan"],
@@ -642,6 +701,36 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
           info: "DeepSeek account availability, shown only when no balance is reported.",
         },
       ],
+    },
+  },
+  {
+    id: "mistral",
+    label: "Mistral Vibe",
+    runtimeIds: ["mistral"],
+    synonyms: ["mistral-vibe", "vibe"],
+    shape: {
+      autoSetup: "usually",
+      authentication: "external_api_key",
+      authFallbacks: ["env_api_key"],
+      quota: "remote_api",
+      optionalVisibilityRows: [
+        {
+          rowKey: MISTRAL_VIBE_BUDGET_ROW_KEY,
+          resultType: MISTRAL_VIBE_ROW_RESULT_TYPE,
+          kind: MISTRAL_VIBE_ROW_KIND,
+          label: MISTRAL_VIBE_BUDGET_LABEL,
+          info: MISTRAL_VIBE_BUDGET_INFO,
+        },
+        {
+          rowKey: MISTRAL_VIBE_API_BUDGET_ROW_KEY,
+          resultType: MISTRAL_VIBE_ROW_RESULT_TYPE,
+          kind: MISTRAL_VIBE_ROW_KIND,
+          label: MISTRAL_VIBE_API_BUDGET_LABEL,
+          info: MISTRAL_VIBE_API_BUDGET_INFO,
+        },
+      ],
+      notes:
+        "Reads the Mistral Vibe billing budget with MISTRAL_API_KEY from the environment, <VIBE_HOME>/.env or an OpenCode Mistral login",
     },
   },
   {

@@ -56,6 +56,7 @@ import type {
 import { isRecord } from "../contracts/dto-guards.js";
 import { isTransientProviderFailureCategory } from "../contracts/provider-failure.js";
 import type { RangeKey } from "../contracts/ranges.js";
+import type { UsageRangeKey } from "../contracts/usage.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 
 /** Default quota/provider poll interval (spec §4.2; existing config overrides). */
@@ -89,6 +90,8 @@ export const MAX_TRACKED_PAGES = 16;
 /** Same-key home reads must coalesce, including foreground priority joins. */
 export type SnapshotSource = Pick<DashboardDataSource, "home" | "project" | "session"> & {
   quota?: DashboardDataSource["quota"];
+  /** Local history only; absent means `/api/v1/usage` answers unavailable. */
+  usage?: DashboardDataSource["usage"];
   groups?: DashboardDataSource["groups"];
   refreshAnalytics?: () => Promise<void>;
   /** Optional worker generation notifications; never starts analytics eagerly. */
@@ -127,7 +130,7 @@ export interface SnapshotViewer {
 }
 
 export interface SnapshotService
-  extends Pick<DashboardDataSource, "home" | "quota" | "project" | "session" | "groups"> {
+  extends Pick<DashboardDataSource, "home" | "quota" | "usage" | "project" | "session" | "groups"> {
   /** Invalidations broadcast over SSE (three topics, never raw snapshots). */
   subscribe(listener: (event: DashboardEvent) => void): () => void;
   /**
@@ -148,6 +151,8 @@ export interface SnapshotService
    * current selected-provider set.
    */
   notifySettingsChanged(options?: { scope?: "visibility" }): void;
+  /** Local usage history changed outside a quota cycle (import completion). */
+  notifyUsageChanged(): void;
   /**
    * Viewer-scoped interest signal. An explicit `signal` (UI route change) wins
    * over an inferred `request` (a read of that kind) until the last disconnect;
@@ -183,6 +188,8 @@ interface InflightTask {
   sourceGeneration: number;
   /** Recency generation captured when this compute should be allowed to cache. */
   version: number;
+  /** Usage invalidation generation at creation; older work never re-caches. */
+  usageVersion: number;
 }
 
 function quotaKey(): string {
@@ -191,6 +198,10 @@ function quotaKey(): string {
 
 function homeKey(range: RangeKey): string {
   return `home\u0000\u0000${range}`;
+}
+
+function usageKey(range: UsageRangeKey): string {
+  return `usage\u0000\u0000${range}`;
 }
 
 function projectKey(projectId: string, range: RangeKey): string {
@@ -212,9 +223,12 @@ function kindOf(key: string): string {
 
 function topicFor(key: string): DashboardEventTopic {
   // Home used to include provider cards and emit quota.changed. It is now
-  // analytics-only (usage/projects), so only the independent quota key emits
-  // quota.changed; every analytics key is a session change.
-  return kindOf(key) === "quota" ? "quota.changed" : "sessions.changed";
+  // analytics-only (usage/projects), so the independent quota read and the
+  // observation-history read emit quota.changed; every analytics key is a
+  // session change. Usage history is filled by the quota poll, so it refreshes
+  // with that topic rather than pretending to be analytics.
+  const kind = kindOf(key);
+  return kind === "quota" || kind === "usage" ? "quota.changed" : "sessions.changed";
 }
 
 /**
@@ -345,6 +359,9 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   /** Key -> recency generation; Map insertion order is LRU order. */
   const tracked = new Map<string, number>();
   let versionCounter = 0;
+  /** Bumped on every Usage invalidation; in-flight usage work is versioned. */
+  let usageVersionCounter = 0;
+  const MAX_USAGE_INVALIDATION_RETRIES = 3;
 
   let viewers = 0;
   /**
@@ -396,6 +413,12 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       }
       // Derivation only: the worker already produced this generation.
       await tickAnalytics(false, true);
+      // Activity coverage can advance without touching any indexed row, so the
+      // notification is also the only signal that an `activityUnavailable`
+      // Usage read may now be certifiable. `tickAnalytics` keeps quiet while
+      // Quota is the only active surface, so the loaded Usage pages are
+      // re-derived here instead of waiting for their next poll.
+      if (!analyticsViewActive()) await tickUsage();
     };
     analyticsNotifyChain = (analyticsNotifyChain ?? Promise.resolve())
       .then(run, run)
@@ -579,9 +602,11 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     force = false,
     promote?: () => void,
     foreground = false,
+    usageRetry = 0,
   ): Promise<T> {
     const epoch = viewerEpoch;
     const generation = sourceGeneration;
+    const usageVersion = usageVersionCounter;
     // A closed service does not track, register, or cache: the caller still
     // gets its computation, but a probe (or a late request) cannot repopulate
     // state that close() released.
@@ -601,7 +626,14 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     }
 
     const pending = inflight.get(key);
-    if (pending && pending.epoch === epoch && pending.sourceGeneration === generation) {
+    if (
+      pending &&
+      pending.epoch === epoch &&
+      pending.sourceGeneration === generation &&
+      // A usage read must not join work that started before the latest local
+      // history invalidation: that result may already be known stale.
+      (kindOf(key) !== "usage" || pending.usageVersion === usageVersion)
+    ) {
       if (foreground && pending.promote) {
         pending.promote();
         pending.promote = undefined;
@@ -643,6 +675,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       sourceGeneration: generation,
       promise: Promise.resolve(),
       version,
+      usageVersion,
     };
     const attempt = (async (): Promise<T> => {
       let snapshot: T;
@@ -676,6 +709,16 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         return markStale(fallback.snapshot) as T;
       }
 
+      // Local history changed while this usage read was computed: the result
+      // may predate the newest observation. Drop it and retry rather than paint
+      // or cache it; a bounded retry prevents a pathological livelock.
+      if (kindOf(key) === "usage" && task.usageVersion !== usageVersionCounter) {
+        if (usageRetry >= MAX_USAGE_INVALIDATION_RETRIES) {
+          throw new Error("usage snapshot invalidated");
+        }
+        return loadSingleFlight(key, compute, true, promote, foreground, usageRetry + 1);
+      }
+
       settledFailures.delete(key);
       // A commit belongs to the viewer session and source identity that started
       // the load: a disconnect or owner handoff already dirtied the entries, so
@@ -684,6 +727,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         !closed &&
         task.epoch === viewerEpoch &&
         task.sourceGeneration === sourceGeneration &&
+        task.usageVersion === usageVersionCounter &&
         tracked.get(key) === task.version
       ) {
         cache.set(key, {
@@ -836,6 +880,30 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         quotaRetryTimer.unref();
       }
     }
+    if (changed.has("quota.changed")) {
+      // New provider observations change the local history this read serves.
+      // Mark it stale instead of polling it: the next Usage read recomputes from
+      // the stored observations without touching a provider.
+      staleUsageEntries();
+      emit({ topic: "quota.changed", at: now() });
+    }
+  }
+
+  /**
+   * Re-derives the loaded Usage pages only. Usage history is filled by the
+   * provider poll, so a Usage page is the one interest a generation
+   * notification can re-derive while Quota is the only active surface. It never
+   * refreshes analytics and never starts the worker.
+   */
+  async function tickUsage(): Promise<void> {
+    const epoch = viewerEpoch;
+    const usageComputes = Array.from(computes).filter(([key]) => kindOf(key) === "usage");
+    if (usageComputes.length === 0) return;
+    const changed = new Set<DashboardEventTopic>();
+    for (const [key, compute] of usageComputes) {
+      if (!(await pollOne(key, compute, epoch, changed))) break;
+    }
+    if (closed || viewerEpoch !== epoch) return;
     if (changed.has("quota.changed")) emit({ topic: "quota.changed", at: now() });
   }
 
@@ -932,6 +1000,16 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     for (const entry of cache.values()) {
       entry.stale = true;
       entry.invalidated = true;
+    }
+  }
+
+  /** Local history changed: recompute every cached Usage range on next read. */
+  function staleUsageEntries(): void {
+    // Version the invalidation so in-flight reads cannot join pre-invalidation
+    // work or cache its result, and retry instead.
+    usageVersionCounter += 1;
+    for (const [key, entry] of cache) {
+      if (kindOf(key) === "usage") entry.stale = true;
     }
   }
 
@@ -1034,7 +1112,11 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         const forcedCompute = () => options.source.quota!({ refresh: true });
         try {
           const result = await load(quotaKey(), forcedCompute, true);
-          if (!closed) emit({ topic: "quota.changed", at: now() });
+          if (!closed) {
+            // A manual refresh records observations too, exactly like the timer.
+            staleUsageEntries();
+            emit({ topic: "quota.changed", at: now() });
+          }
           return result;
         } finally {
           if (!closed && computes.get(quotaKey()) === forcedCompute)
@@ -1049,6 +1131,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         .catch(() => undefined);
       return refresh;
     },
+    usage: (input) =>
+      load(usageKey(input.range), () => {
+        if (!options.source.usage) {
+          return Promise.reject(new Error("Usage source unavailable"));
+        }
+        return options.source.usage(input);
+      }),
     project: (input) =>
       load(projectKey(input.projectId, input.range), () =>
         options.source.project({ projectId: input.projectId, range: input.range }),
@@ -1098,6 +1187,12 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       };
     },
 
+    notifyUsageChanged(): void {
+      if (closed) return;
+      staleUsageEntries();
+      emit({ topic: "quota.changed", at: now() });
+    },
+
     notifySettingsChanged(settingsOptions?: { scope?: "visibility" }): void {
       if (closed) return;
       if (settingsOptions?.scope !== "visibility") {
@@ -1108,6 +1203,8 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
             entry.invalidated = true;
           }
         }
+        // Import toggles and visibility settings change what Usage serves.
+        staleUsageEntries();
         // Re-read both interval getters from live settings (R16).
         restartPollers();
       }

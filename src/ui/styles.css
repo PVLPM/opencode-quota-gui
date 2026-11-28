@@ -248,7 +248,7 @@
   background: var(--qg-text-secondary);
 }
 
-/* Peer Analytics / Models tabs replace the single frame label inside Analytics. */
+/* Peer Analytics / Models and Quota / Usage tabs replace the single frame label. */
 .qg-analytics-tabs {
   gap: 20px;
 }
@@ -414,6 +414,33 @@
 }
 .qg-range [data-slot="segmented-control-v2-item"] {
   padding-inline: 8px;
+}
+
+/* Usage adds a long label ("Lifetime"), so its segments keep their content
+   width instead of sharing the range equally. The control caps itself to its
+   own row — never the viewport, which in the Native side panel is much wider
+   than the panel — and scrolls internally only when that row cannot fit it. */
+.qg-usage-range[data-slot="segmented-control-v2"] {
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.qg-usage-range[data-slot="segmented-control-v2"]::-webkit-scrollbar {
+  display: none;
+}
+
+.qg-usage-range [data-slot="segmented-control-v2-item"] {
+  flex: 0 0 auto;
+  min-width: max-content;
+}
+
+/* An x-scroller clips both axes, so keep the focus ring inside the item. */
+.qg-usage-range [data-slot="segmented-control-v2-item"]:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--qg-accent-border);
 }
 
 /* A range still being prefetched: the same thin spinning ring as the native
@@ -3232,7 +3259,8 @@
     padding: 6px 12px;
     gap: 8px;
   }
-  .qg-frame-tab::after {
+  .qg-frame-tab::after,
+  .qg-analytics-tabs a[aria-current="page"]::after {
     bottom: -7px;
   }
   .qg-settings__scroll {
@@ -3248,8 +3276,8 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .qg-chart-shell .qg-summary {
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 10px 20px;
+    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+    gap: 10px 16px;
     padding: 14px 16px;
   }
   .qg-chart-shell__value[data-emphasis="primary"] {
@@ -3588,11 +3616,488 @@
   font-size: var(--font-size-small);
 }
 
+/* The library's critical surface follows the light/dark scheme (near-white in
+   light), while toast text uses the dark-only qg palette; the error tone keeps
+   the dark raised surface and carries its meaning in the border. */
 .qg-toast[data-tone="error"] {
   border-color: var(--qg-danger-border);
-  background: var(--qg-danger-surface);
+  background: var(--qg-surface-raised);
+  color: var(--qg-text);
 }
 
 .qg-toast[data-tone="success"] {
   border-color: var(--qg-success);
+}
+
+/* ---------- Usage (v1.4.0) ---------- */
+
+/* The tab names the view, so there is no page heading, count, legend or
+   footer: accounts start immediately and one info trigger carries the caveats. */
+.qg-usage-view {
+  gap: 12px;
+}
+
+/* One view-level caveat trigger, always visible because it is the only legend.
+   It reuses the Quota card's own action size and radius, so both card headers
+   carry the same control family. */
+.qg-usage-info {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: -5px -5px -5px 0;
+  border-radius: 4px;
+  color: var(--qg-text-muted);
+  cursor: help;
+}
+
+.qg-usage-info:hover,
+.qg-usage-info:focus-visible {
+  background: var(--surface-raised-base-hover);
+  color: var(--qg-text);
+  outline: none;
+}
+
+.qg-usage-info:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 2px;
+}
+
+.qg-usage-info__icon {
+  display: inline-flex;
+}
+
+.qg-usage-caveats {
+  max-width: 340px;
+  font-size: var(--font-size-small);
+  line-height: 1.45;
+}
+
+.qg-usage-caveats__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.qg-usage-view__notice {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--qg-warning-border);
+  border-radius: var(--qg-radius);
+  background: var(--qg-surface-raised);
+  color: var(--qg-text-secondary);
+  font-size: var(--font-size-small);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.qg-usage-accounts,
+.qg-usage-imported-activity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.qg-usage-account {
+  min-width: 0;
+}
+
+/* The Quota card header supplies identity layout; the heading only resets its
+   h2 defaults, so provider, plan and account keep the card's own line height. */
+.qg-usage-account__title {
+  margin: 0;
+  font: inherit;
+  font-weight: var(--font-weight-medium);
+}
+
+.qg-usage-account__empty {
+  margin: 0;
+  padding: 12px 16px;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+}
+
+/* One full-width row per quota window at every width: comparison happens by
+   reading down the card, never by squeezing plots side by side. */
+.qg-usage-account__windows {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 16px 6px;
+}
+
+.qg-usage-window {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.qg-usage-window__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 12px;
+  flex-wrap: wrap;
+}
+
+.qg-usage-window__title {
+  margin: 0;
+  color: var(--qg-text);
+  font-size: var(--font-size-small);
+  font-weight: 550;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.qg-usage-window__estimate-tag {
+  margin-left: 4px;
+  color: var(--qg-warning);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.qg-usage-window__stats {
+  display: flex;
+  align-items: baseline;
+  gap: 4px 10px;
+  flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.qg-usage-window__value {
+  color: var(--qg-text);
+  font-size: var(--font-size-small);
+  font-weight: 550;
+}
+
+.qg-usage-window__mode {
+  color: var(--qg-text-muted);
+  font-weight: 400;
+}
+
+.qg-usage-window__change,
+.qg-usage-window__estimate {
+  color: var(--qg-text-muted);
+  font-size: 11px;
+}
+
+.qg-usage-chart {
+  position: relative;
+  min-width: 0;
+}
+
+.qg-usage-chart__plot {
+  display: block;
+}
+
+.qg-usage-chart__line {
+  fill: none;
+  stroke: var(--qg-chart-context);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Neutral dashes: a comparable endpoint pair whose trajectory was not seen. */
+.qg-usage-chart__gap {
+  fill: none;
+  stroke: var(--qg-text-muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.qg-usage-chart__sample {
+  fill: var(--qg-chart-context);
+}
+
+.qg-usage-chart__unavailable {
+  fill: var(--qg-text-muted);
+  opacity: 0.08;
+}
+
+.qg-usage-chart__reset {
+  stroke: var(--qg-danger);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.8;
+}
+
+.qg-usage-chart__reset-mark {
+  fill: var(--qg-danger);
+}
+
+/* Amber and short-dashed: a projection from the last measured point, never a
+   monitoring gap and never a stored point. */
+.qg-usage-chart__projection {
+  fill: none;
+  stroke: var(--qg-warning);
+  stroke-width: 1.25;
+  stroke-dasharray: 2 3;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.qg-usage-chart__projection-end {
+  fill: var(--qg-warning);
+}
+
+.qg-usage-chart__latest {
+  fill: var(--qg-chart-context);
+  stroke: var(--qg-frame);
+  stroke-width: 1;
+}
+
+.qg-usage-chart__active-point {
+  fill: var(--qg-text);
+}
+
+.qg-usage-chart__empty {
+  position: absolute;
+  inset: 20% 18% auto;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: var(--qg-radius);
+  background: color-mix(in srgb, var(--qg-frame) 82%, transparent);
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* A small, content-width readout: one time, at most three values and one short
+   state word. */
+.qg-usage-chart__tooltip {
+  width: max-content;
+  padding: 6px 9px;
+  font-size: 11px;
+}
+
+.qg-usage-tooltip__time {
+  margin-bottom: 2px;
+  color: var(--qg-text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.qg-usage-tooltip__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  white-space: nowrap;
+}
+
+.qg-usage-tooltip__row > :last-child {
+  color: var(--qg-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.qg-usage-tooltip__note {
+  margin: 2px 0 0;
+  color: var(--qg-text-muted);
+  font-size: 10px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.qg-usage-imported {
+  gap: 8px;
+  padding-bottom: 10px;
+}
+
+.qg-usage-imported > .qg-usage-view__note,
+.qg-usage-imported > .qg-usage-breakdown__model,
+.qg-usage-imported > .qg-usage-account__empty {
+  margin-inline: 16px;
+}
+
+.qg-usage-view__note {
+  margin: 0;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.qg-usage-breakdown {
+  margin: 0 16px;
+  padding-top: 10px;
+  padding-bottom: 12px;
+  border-top: 1px solid var(--qg-border);
+}
+
+.qg-usage-breakdown > summary {
+  cursor: pointer;
+  color: var(--qg-text-secondary);
+  font-size: var(--font-size-small);
+  font-weight: 550;
+  list-style-position: inside;
+}
+
+.qg-usage-breakdown > summary:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 2px;
+}
+
+.qg-usage-breakdown__content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.qg-usage-breakdown__controls {
+  display: flex;
+  align-items: center;
+  gap: 6px 10px;
+  flex-wrap: wrap;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+}
+
+.qg-usage-breakdown__select {
+  width: auto;
+  min-width: 130px;
+}
+
+.qg-usage-breakdown__coverage,
+.qg-usage-breakdown__meta,
+.qg-usage-breakdown__note {
+  margin: 0;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+  overflow-wrap: anywhere;
+}
+
+.qg-usage-breakdown__model {
+  border: 1px solid var(--qg-border);
+  border-radius: var(--qg-radius);
+  background: var(--qg-surface);
+}
+
+/* A grid summary cannot keep the native disclosure marker, so the row draws
+   its own chevron in the left gutter and the label column starts after it. */
+.qg-usage-breakdown__model > summary {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr);
+  gap: 4px 14px;
+  align-items: baseline;
+  padding: 8px 12px 8px 24px;
+  cursor: pointer;
+  color: var(--qg-text-secondary);
+  font-size: var(--font-size-small);
+}
+
+.qg-usage-breakdown__model > summary::before {
+  content: "";
+  position: absolute;
+  top: 18px;
+  left: 12px;
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid var(--qg-text-muted);
+  border-bottom: 1.5px solid var(--qg-text-muted);
+  transform: translateY(-50%) rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.qg-usage-breakdown__model[open] > summary::before {
+  transform: translateY(-50%) rotate(45deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qg-usage-breakdown__model > summary::before {
+    transition: none;
+  }
+}
+
+.qg-usage-breakdown__model > summary:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: -2px;
+}
+
+.qg-usage-breakdown__model-name {
+  min-width: 0;
+  color: var(--qg-text);
+  overflow-wrap: anywhere;
+}
+
+.qg-usage-breakdown__tokens,
+.qg-usage-breakdown__cost,
+.qg-usage-breakdown__estimate {
+  font-variant-numeric: tabular-nums;
+}
+
+.qg-usage-breakdown__estimate {
+  color: var(--qg-text-muted);
+}
+
+.qg-usage-breakdown__body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0 12px 10px;
+}
+
+/* Same track ratios and content start as the model summary: a child's token,
+   cost and attribution columns stay under its parent's instead of stepping
+   inward with the indent. */
+.qg-usage-breakdown__effort {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr);
+  gap: 4px 14px;
+  padding: 5px 0 0 14px;
+  border-top: 1px dashed var(--qg-border);
+  color: var(--qg-text-secondary);
+  font-size: var(--font-size-small);
+}
+
+.qg-usage-breakdown__effort-name {
+  padding-left: 14px;
+  color: var(--qg-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.qg-usage-breakdown__effort .qg-usage-breakdown__meta {
+  grid-column: 1 / -1;
+  padding-left: 14px;
+}
+
+/* Inline so the step count and its token categories share one sentence
+   instead of the block-level list breaking after the separator. */
+.qg-usage-breakdown__categories {
+  display: inline-flex;
+  gap: 4px 10px;
+  flex-wrap: wrap;
+}
+
+.qg-usage-breakdown__unattributed {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 2fr);
+  gap: 4px 14px;
+  align-items: baseline;
+  padding: 8px 12px;
+  border: 1px dashed var(--qg-border-strong);
+  border-radius: var(--qg-radius);
+  font-size: var(--font-size-small);
+}
+
+.qg-usage-breakdown__reason {
+  color: var(--qg-text-muted);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+  .qg-usage-breakdown__model > summary,
+  .qg-usage-breakdown__effort,
+  .qg-usage-breakdown__unattributed {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

@@ -31,6 +31,7 @@ import {
   SYNTHETIC_PROVIDER_LABEL,
   seedSyntheticFixture,
 } from "./fixtures/synthetic-gui-dashboard.mjs";
+import { buildSyntheticUsageSnapshot } from "./fixtures/synthetic-usage.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -40,6 +41,8 @@ const DIST_MODULES = {
   sources: join(REPO_ROOT, "dist", "gui", "sources.js"),
   config: join(REPO_ROOT, "dist", "gui", "config.js"),
   types: join(REPO_ROOT, "dist", "lib", "types.js"),
+  identity: join(REPO_ROOT, "dist", "contracts", "identity.js"),
+  quotaIdentity: join(REPO_ROOT, "dist", "lib", "quota-identity.js"),
 };
 
 /** Every path-bearing env var the fixture pins before dist modules load. */
@@ -69,14 +72,16 @@ function assertBuiltDist() {
 
 async function importDistModules() {
   assertBuiltDist();
-  const [server, snapshots, sources, config, types] = await Promise.all([
+  const [server, snapshots, sources, config, types, identity, quotaIdentity] = await Promise.all([
     import(pathToFileURL(DIST_MODULES.server).href),
     import(pathToFileURL(DIST_MODULES.snapshots).href),
     import(pathToFileURL(DIST_MODULES.sources).href),
     import(pathToFileURL(DIST_MODULES.config).href),
     import(pathToFileURL(DIST_MODULES.types).href),
+    import(pathToFileURL(DIST_MODULES.identity).href),
+    import(pathToFileURL(DIST_MODULES.quotaIdentity).href),
   ]);
-  return { server, snapshots, sources, config, types };
+  return { server, snapshots, sources, config, types, identity, quotaIdentity };
 }
 
 /**
@@ -139,6 +144,25 @@ export async function startSyntheticDashboard(options = {}) {
         return providerId;
       },
     });
+    // Usage history is synthetic and deterministic: the smoke never reads real
+    // observation history, and the read stays local (no provider request).
+    // One synthetic window shares the OpenAI quota row's identity, so the
+    // Usage chart draws that row's runway projection.
+    const runwayCardId = modules.quotaIdentity.buildProviderScopeCardId(
+      SYNTHETIC_OPENAI_PROVIDER_ID,
+    );
+    const runwayEntry = buildSyntheticProviderProbes(nowMs).find(
+      (probe) => probe.providerId === SYNTHETIC_OPENAI_PROVIDER_ID,
+    )?.result.entries[0];
+    const runwayLink =
+      runwayEntry === undefined
+        ? undefined
+        : {
+            accountKey: runwayCardId,
+            rowId: modules.identity.rowIdForEntry(runwayCardId, runwayEntry),
+          };
+    source.usage = async (input) =>
+      buildSyntheticUsageSnapshot({ range: input.range, nowMs, runwayLink });
     const port = options.port ?? modules.types.DEFAULT_DASHBOARD_PORT;
     // Mirror the lifecycle-owned runtime: one shared snapshot service per host,
     // handed to the HTTP transport rather than constructed inside it.

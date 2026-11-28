@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AnalyticsGroupSnapshot,
   DashboardEvent,
+  DeleteImportedHistoryResult,
   GuiSettingsStore,
   HomeSnapshot,
+  ImportedHistoryDeleter,
   ImportPreview,
   ProjectSnapshot,
   QuotaSnapshot,
@@ -12,6 +14,7 @@ import type {
   SettingsSnapshot,
   SettingsWriteResult,
 } from "../src/contracts/dashboard.js";
+import type { UsageSnapshot } from "../src/contracts/usage.js";
 import { GuiSettingsError } from "../src/gui/config.js";
 import {
   type DashboardRpcRegister,
@@ -128,6 +131,7 @@ function createFakeRuntime() {
   const snapshots = {
     home: vi.fn(async () => ({ marker: "home" }) as unknown as HomeSnapshot),
     quota: vi.fn(async () => ({ marker: "quota" }) as unknown as QuotaSnapshot),
+    usage: vi.fn(async () => ({ marker: "usage" }) as unknown as UsageSnapshot),
     project: vi.fn(async () => ({ marker: "project" }) as unknown as ProjectSnapshot),
     session: vi.fn(async () => ({ marker: "session" }) as unknown as SessionSnapshot),
     groups: vi.fn(async () => ({ marker: "groups" }) as unknown as AnalyticsGroupSnapshot),
@@ -142,6 +146,7 @@ function createFakeRuntime() {
       return { release };
     }),
     notifySettingsChanged: vi.fn(),
+    notifyUsageChanged: vi.fn(),
   } as unknown as SnapshotService;
   const settings = {
     settings: vi.fn(async () => ({ revision: "rev-1" }) as unknown as SettingsSnapshot),
@@ -151,12 +156,23 @@ function createFakeRuntime() {
     importApply: vi.fn(async () => ({ revision: "rev-4" }) as unknown as SettingsWriteResult),
     openSettingsFile: vi.fn(async () => undefined),
   } as unknown as GuiSettingsStore;
-  const runtime: DashboardRpcRuntime = { snapshots, settings };
+  const usage: ImportedHistoryDeleter & {
+    deleteImportedHistory: ReturnType<typeof vi.fn>;
+  } = {
+    deleteImportedHistory: vi.fn(
+      async (): Promise<DeleteImportedHistoryResult> => ({
+        invocations: 3,
+        rateLimitSeries: 1,
+      }),
+    ),
+  };
+  const runtime: DashboardRpcRuntime = { snapshots, settings, usage };
 
   return {
     runtime,
     snapshots,
     settings,
+    usage,
     released,
     emit(event: DashboardEvent) {
       for (const listener of listeners) listener(event);
@@ -193,6 +209,7 @@ describe("dashboard RPC handlers", () => {
       contractVersion: 2,
     });
     await expect(call(captured, "quota", {})).resolves.toEqual({ marker: "quota" });
+    await expect(call(captured, "usage", { range: "7d" })).resolves.toEqual({ marker: "usage" });
     await expect(call(captured, "home", { range: "7d" })).resolves.toEqual({ marker: "home" });
     await expect(call(captured, "home", { range: "30d", background: true })).resolves.toEqual({
       marker: "home",
@@ -208,6 +225,7 @@ describe("dashboard RPC handlers", () => {
     });
 
     expect(fake.snapshots.home).toHaveBeenCalledWith({ range: "7d" });
+    expect(fake.snapshots.usage).toHaveBeenCalledWith({ range: "7d" });
     expect(fake.snapshots.home).toHaveBeenCalledWith({ range: "30d", background: true });
     expect(fake.snapshots.groups).toHaveBeenCalledWith({ range: "7d", dimension: "model" });
     await expect(call(captured, "settings", {})).resolves.toEqual({ revision: "rev-1" });
@@ -287,6 +305,36 @@ describe("dashboard RPC handlers", () => {
     try {
       const captured = registrar.read();
       const result = await call(captured, "openSettingsFile", {});
+      expect(result).toEqual({
+        type: "config-target-error",
+        message: "The dashboard config path is not writable",
+        data: {},
+      });
+    } finally {
+      await received.dispose();
+    }
+  });
+
+  it("routes imported-history deletion through the usage seam and refreshes Usage only", async () => {
+    const { captured, fake } = await setup();
+
+    const result = await call(captured, "deleteImportedHistory", { harness: "codex" });
+
+    expect(result).toEqual({ invocations: 3, rateLimitSeries: 1 });
+    expect(fake.usage.deleteImportedHistory).toHaveBeenCalledWith("codex");
+    // Imported activity feeds the Usage read, so that is what is invalidated;
+    // the settings file was never written.
+    expect(fake.snapshots.notifyUsageChanged).toHaveBeenCalledOnce();
+    expect(fake.snapshots.notifySettingsChanged).not.toHaveBeenCalled();
+  });
+
+  it("reports a typed error when the usage recorder seam is absent", async () => {
+    const registrar = createFakeRegistrar();
+    const fake = createFakeRuntime();
+    const runtime: DashboardRpcRuntime = { snapshots: fake.snapshots, settings: fake.settings };
+    const received = await registerDashboardRpc({ register: registrar.register }, runtime);
+    try {
+      const result = await call(registrar.read(), "deleteImportedHistory", { harness: "codex" });
       expect(result).toEqual({
         type: "config-target-error",
         message: "The dashboard config path is not writable",

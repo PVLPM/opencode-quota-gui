@@ -37,6 +37,12 @@ import {
   rangeBucketUnit,
   rangeWindow,
 } from "../contracts/ranges.js";
+import type {
+  UsageActivityEntry,
+  UsageActivityInterval,
+  UsageActivityQuery,
+  UsageActivityResult,
+} from "../contracts/usage-activity.js";
 import { lookupCost, selectCostAtContext } from "../lib/modelsdev-pricing.js";
 import {
   getTemporalPolicy,
@@ -74,6 +80,8 @@ export interface OwnedStep {
   providerID?: string;
   modelID?: string;
   agent?: string;
+  /** Recorded reasoning effort; absent = unknown, `"default"` is explicit. */
+  effort?: string;
   costUsd: number;
   pricedAny: boolean;
   unpricedTokens: number;
@@ -127,6 +135,7 @@ interface GroupOccurrence {
   providerID?: string;
   modelID?: string;
   agent?: string;
+  variant?: string;
   costUsd: number;
   pricedAny: boolean;
   unpricedTokens: number;
@@ -486,6 +495,12 @@ function projectIdOfSession(session: OpenCodeSessionInfo): string {
   return projectId ? projectId : UNKNOWN_PROJECT_ID;
 }
 
+/** Recorded effort semantics: absent/empty is unknown; `"default"` is explicit. */
+function effortOf(variant: string | undefined): string | undefined {
+  const value = variant?.trim();
+  return value ? value : undefined;
+}
+
 function inWindow(timestampMs: number | undefined, window: RangeWindow): boolean {
   if (timestampMs === undefined || !Number.isFinite(timestampMs)) return false;
   if (timestampMs >= window.untilMs) return false;
@@ -507,6 +522,8 @@ export interface AnalyticsModel {
   home(range: RangeKey, nowMs: number): HomeAnalyticsRollup;
   project(projectId: string, range: RangeKey, nowMs: number): ProjectSnapshot;
   groups(query: AnalyticsGroupQuery, nowMs: number): AnalyticsGroupSnapshot;
+  /** Bounded per-interval activity read over the owned hour buckets. */
+  activity(query: UsageActivityQuery): UsageActivityResult;
   earliestActivityMs(): number | undefined;
   ownedStepCount(): number;
   /** Distinct analytics routes whose last pricing outcome had no cost. */
@@ -861,6 +878,8 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     if (occurrence.providerID !== undefined) step.providerID = occurrence.providerID;
     if (occurrence.modelID !== undefined) step.modelID = occurrence.modelID;
     if (occurrence.agent !== undefined) step.agent = occurrence.agent;
+    const effort = effortOf(occurrence.variant);
+    if (effort !== undefined) step.effort = effort;
     return step;
   }
 
@@ -872,6 +891,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       step.tokens.output === occurrence.output &&
       step.tokens.reasoning === occurrence.reasoning &&
       step.agent === occurrence.agent &&
+      step.effort === effortOf(occurrence.variant) &&
       step.completedAtMs === occurrence.completedAtMs &&
       step.costUsd === occurrence.costUsd &&
       step.pricedAny === occurrence.pricedAny &&
@@ -1028,6 +1048,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     if (row.providerID !== undefined) occurrence.providerID = row.providerID;
     if (row.modelID !== undefined) occurrence.modelID = row.modelID;
     if (row.agent !== undefined) occurrence.agent = row.agent;
+    if (row.variant !== undefined) occurrence.variant = row.variant;
     const index = occurrences.findIndex((entry) => entry.messageID === row.messageID);
     if (index >= 0) occurrences[index] = occurrence;
     else occurrences.push(occurrence);
@@ -1452,6 +1473,207 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     return snapshot;
   }
 
+  interface ActivityGroup {
+    providerId: string;
+    modelId: string;
+    effort?: string;
+    accumulator: Accumulator;
+    stepCount: number;
+  }
+
+  function compareEfforts(a: string | undefined, b: string | undefined): number {
+    if (a === b) return 0;
+    if (a === undefined) return 1;
+    if (b === undefined) return -1;
+    return compareIds(a, b);
+  }
+
+  /** Last interval with `startMs < timeMs`, or -1 when none can contain it. */
+  function intervalIndexFor(
+    intervals: UsageActivityQuery["intervals"],
+    fromIndex: number,
+    timeMs: number,
+  ): number {
+    let low = fromIndex;
+    let high = intervals.length - 1;
+    let found = -1;
+    while (low <= high) {
+      const middle = (low + high) >>> 1;
+      const interval = intervals[middle];
+      if (interval === undefined) return found;
+      if (interval.startMs < timeMs) {
+        found = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    const interval = found < 0 ? undefined : intervals[found];
+    if (interval === undefined || timeMs > interval.endMs) return -1;
+    return found;
+  }
+
+  interface ActivityCounts {
+    tokens: number;
+    steps: number;
+  }
+
+  function stepTokenTotal(step: OwnedStep): number {
+    return (
+      step.tokens.input +
+      step.tokens.output +
+      step.tokens.reasoning +
+      step.tokens.cacheRead +
+      step.tokens.cacheWrite
+    );
+  }
+
+  function materializeActivityInterval(
+    interval: UsageActivityQuery["intervals"][number],
+    groups: Map<string, ActivityGroup> | undefined,
+    unidentified: ActivityCounts | undefined,
+    unmatched: ActivityCounts | undefined,
+  ): UsageActivityInterval {
+    const entries: UsageActivityEntry[] = [];
+    let incomplete = false;
+    let unpricedTokens = 0;
+    let unknownTokens = 0;
+    for (const group of groups?.values() ?? []) {
+      const tokens = finalize(group.accumulator);
+      unpricedTokens += tokens.unpricedTokens;
+      unknownTokens += tokens.unknownTokens;
+      if (
+        tokens.apiEquivalentCostUsd === null ||
+        tokens.unpricedTokens > 0 ||
+        tokens.unknownTokens > 0
+      ) {
+        incomplete = true;
+      }
+      const entry: UsageActivityEntry = {
+        providerId: group.providerId,
+        modelId: group.modelId,
+        tokens,
+        stepCount: group.stepCount,
+      };
+      if (group.effort !== undefined) entry.effort = group.effort;
+      entries.push(entry);
+    }
+    entries.sort(
+      (a, b) =>
+        compareIds(a.providerId, b.providerId) ||
+        compareIds(a.modelId, b.modelId) ||
+        compareEfforts(a.effort, b.effort),
+    );
+    if ((unidentified?.steps ?? 0) > 0) incomplete = true;
+    return {
+      startMs: interval.startMs,
+      endMs: interval.endMs,
+      entries,
+      incomplete,
+      unpricedTokens,
+      unknownTokens,
+      unidentifiedTokens: unidentified?.tokens ?? 0,
+      unidentifiedSteps: unidentified?.steps ?? 0,
+      unmatchedTokens: unmatched?.tokens ?? 0,
+      unmatchedSteps: unmatched?.steps ?? 0,
+    };
+  }
+
+  /**
+   * One sweep over populated hour buckets intersecting the sorted intervals,
+   * then a binary search per owned step. No interval rescans the step list and
+   * no storage read happens here. Identified provider/model steps are grouped;
+   * a requested provider with no model identity is counted as unidentified and
+   * a step with no provider identity is counted as unmatched. Neither guessed
+   * group is attributed.
+   */
+  function activity(query: UsageActivityQuery): UsageActivityResult {
+    const intervals = query.intervals;
+    const providerIds = new Set(query.providerIds);
+    const groupsByInterval: Array<Map<string, ActivityGroup> | undefined> = new Array(
+      intervals.length,
+    );
+    const unidentifiedByInterval: Array<ActivityCounts | undefined> = new Array(intervals.length);
+    const unmatchedByInterval: Array<ActivityCounts | undefined> = new Array(intervals.length);
+    if (intervals.length > 0 && providerIds.size > 0 && hours.size > 0) {
+      const hourStarts = [...hours.keys()].sort((a, b) => a - b);
+      let intervalCursor = 0;
+      for (const hourStart of hourStarts) {
+        const hourEnd = hourStart + HOUR_MS;
+        while (
+          intervalCursor < intervals.length &&
+          (intervals[intervalCursor]?.endMs ?? 0) < hourStart
+        ) {
+          intervalCursor += 1;
+        }
+        if (intervalCursor >= intervals.length) break;
+        const activeInterval = intervals[intervalCursor];
+        if (activeInterval === undefined || activeInterval.startMs >= hourEnd) continue;
+        const bucket = hours.get(hourStart);
+        if (!bucket) continue;
+        for (const step of bucket.steps.values()) {
+          const completedAtMs = step.completedAtMs;
+          if (completedAtMs < hourStart || completedAtMs >= hourEnd) continue;
+          const providerId = step.providerID;
+          const modelId = step.modelID;
+          if (!providerId || !modelId) {
+            const totalTokens = stepTokenTotal(step);
+            if (!(totalTokens > 0)) continue;
+            const intervalIndex = intervalIndexFor(intervals, intervalCursor, completedAtMs);
+            if (intervalIndex < 0) continue;
+            const target =
+              providerId && providerIds.has(providerId)
+                ? unidentifiedByInterval
+                : providerId
+                  ? undefined
+                  : unmatchedByInterval;
+            if (target === undefined) continue;
+            let counts = target[intervalIndex];
+            if (counts === undefined) {
+              counts = { tokens: 0, steps: 0 };
+              target[intervalIndex] = counts;
+            }
+            counts.tokens += totalTokens;
+            counts.steps += 1;
+            continue;
+          }
+          if (!providerIds.has(providerId)) continue;
+          const intervalIndex = intervalIndexFor(intervals, intervalCursor, completedAtMs);
+          if (intervalIndex < 0) continue;
+          const key = `${providerId}\u0000${modelId}\u0000${step.effort ?? ""}`;
+          let groups = groupsByInterval[intervalIndex];
+          if (groups === undefined) {
+            groups = new Map();
+            groupsByInterval[intervalIndex] = groups;
+          }
+          let group = groups.get(key);
+          if (group === undefined) {
+            group = {
+              providerId,
+              modelId,
+              accumulator: createAccumulator(),
+              stepCount: 0,
+            };
+            if (step.effort !== undefined) group.effort = step.effort;
+            groups.set(key, group);
+          }
+          addStepToAccumulator(group.accumulator, step);
+          group.stepCount += 1;
+        }
+      }
+    }
+    return {
+      intervals: intervals.map((interval, index) =>
+        materializeActivityInterval(
+          interval,
+          groupsByInterval[index],
+          unidentifiedByInterval[index],
+          unmatchedByInterval[index],
+        ),
+      ),
+    };
+  }
+
   function buildUsage(
     range: RangeKey,
     nowMs: number,
@@ -1775,6 +1997,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     home,
     project,
     groups: groupedSnapshot,
+    activity,
     earliestActivityMs: earliestActivity,
     ownedStepCount() {
       let count = 0;
