@@ -5,7 +5,13 @@
  * exercised only against a mocked `node:child_process`. No test starts the real
  * `agy` binary or touches a real account.
  */
-import { describe, expect, it, vi } from "vitest";
+
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it, vi } from "vitest";
+
+import { symlinkOrSkip } from "./helpers/symlink-capability.js";
 
 const execFileMock = vi.hoisted(() => ({ execFile: vi.fn() }));
 
@@ -170,7 +176,7 @@ describe("agy version gate", () => {
       runner,
       platform: "linux",
       env: { PATH: "/definitely/not/here" },
-      isFile: async () => false,
+      isExecutableFile: async () => false,
     });
 
     expect(read).toEqual({ state: "not-installed" });
@@ -464,7 +470,7 @@ describe("agy binary resolution", () => {
     const found = await resolveAgyBinaryPath({
       platform: "win32",
       env: { PATH: "C:\\Tools;C:\\Other" },
-      isFile: async (candidate) => candidate === "C:\\Other\\agy.exe",
+      isExecutableFile: async (candidate) => candidate === "C:\\Other\\agy.exe",
     });
 
     expect(found).toBe("C:\\Other\\agy.exe");
@@ -474,7 +480,7 @@ describe("agy binary resolution", () => {
     const found = await resolveAgyBinaryPath({
       platform: "win32",
       env: { PATH: "C:\\Tools", LOCALAPPDATA: "C:\\Users\\fixture\\AppData\\Local" },
-      isFile: async (candidate) =>
+      isExecutableFile: async (candidate) =>
         candidate === "C:\\Users\\fixture\\AppData\\Local\\agy\\bin\\agy.exe",
     });
 
@@ -485,7 +491,7 @@ describe("agy binary resolution", () => {
     const found = await resolveAgyBinaryPath({
       platform: "linux",
       env: { PATH: "/usr/local/bin:/usr/bin" },
-      isFile: async () => false,
+      isExecutableFile: async () => false,
     });
 
     expect(found).toBeNull();
@@ -496,7 +502,7 @@ describe("agy binary resolution", () => {
     const found = await resolveAgyBinaryPath({
       platform: "linux",
       env: { PATH: "::.:relative/bin:/opt/agy/bin:" },
-      isFile: async (candidate) => {
+      isExecutableFile: async (candidate) => {
         seen.push(candidate);
         return candidate === "/opt/agy/bin/agy";
       },
@@ -510,7 +516,7 @@ describe("agy binary resolution", () => {
     const found = await resolveAgyBinaryPath({
       platform: "linux",
       env: { PATH: ":.:relative/bin:./bin" },
-      isFile: async () => true,
+      isExecutableFile: async () => true,
     });
 
     expect(found).toBeNull();
@@ -521,7 +527,7 @@ describe("agy binary resolution", () => {
     const found = await resolveAgyBinaryPath({
       platform: "win32",
       env: { PATH: '"relative\\tools";;C:\\Tools' },
-      isFile: async (candidate) => {
+      isExecutableFile: async (candidate) => {
         seen.push(candidate);
         return candidate === "C:\\Tools\\agy.exe";
       },
@@ -529,6 +535,73 @@ describe("agy binary resolution", () => {
 
     expect(found).toBe("C:\\Tools\\agy.exe");
     expect(seen).toEqual(["C:\\Tools\\agy.exe"]);
+  });
+});
+
+describe("agy binary resolution against filesystem fixtures", () => {
+  const tempRoots: string[] = [];
+
+  async function makeTempDir(prefix: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), prefix));
+    tempRoots.push(dir);
+    return dir;
+  }
+
+  afterAll(async () => {
+    await Promise.all(tempRoots.map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  /** Writes a placeholder executable; on POSIX it also carries the execute bit. */
+  async function writeExecutable(path: string): Promise<void> {
+    await writeFile(path, "#!/bin/sh\nexit 0\n", { encoding: "utf8" });
+    if (process.platform !== "win32") await chmod(path, 0o755);
+  }
+
+  it("resolves a symlink to an executable target", async (context) => {
+    const dir = await makeTempDir("agy-resolve-link-");
+    const target = join(dir, "agy-real");
+    await writeExecutable(target);
+    const linkName = process.platform === "win32" ? "agy.exe" : "agy";
+    const link = join(dir, linkName);
+    if (!symlinkOrSkip(context, target, link)) return;
+
+    const found = await resolveAgyBinaryPath({
+      platform: process.platform,
+      env: { PATH: dir },
+    });
+
+    expect(found).toBe(link);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "skips a non-executable file and finds the executable in a later PATH entry",
+    async () => {
+      const first = await makeTempDir("agy-resolve-noexec-");
+      const second = await makeTempDir("agy-resolve-exec-");
+      await writeFile(join(first, "agy"), "not executable", { encoding: "utf8" });
+      const executable = join(second, "agy");
+      await writeExecutable(executable);
+
+      const found = await resolveAgyBinaryPath({
+        platform: process.platform,
+        env: { PATH: `${first}:${second}` },
+      });
+
+      expect(found).toBe(executable);
+    },
+  );
+
+  it("skips a directory named agy", async () => {
+    const dir = await makeTempDir("agy-resolve-dir-");
+    const dirName = process.platform === "win32" ? "agy.exe" : "agy";
+    await mkdir(join(dir, dirName), { recursive: true });
+
+    const found = await resolveAgyBinaryPath({
+      platform: process.platform,
+      env: { PATH: dir },
+    });
+
+    expect(found).toBeNull();
   });
 });
 
