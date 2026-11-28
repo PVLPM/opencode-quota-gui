@@ -104,6 +104,25 @@ at the right tuples, so this only affects which key a later lookup finds.)
   Otherwise `bun:sqlite` keeps the connection, and on Windows the file lock,
   alive after `close()`.
 
+## Local trust boundary
+
+`analytics.sqlite` is trusted like `analytics-v3.json` was: it lives in the
+user's state directory and only that user can change it.
+
+- The store never opens a database whose file, `-wal`, `-shm` or `-journal` is
+  a symlink or a hard link, because SQLite writes through links (the JSON
+  writer replaced its file by rename). Links in parent directories are not
+  checked, as in the baseline.
+- Rows are type-checked and an inconsistent index is rebuilt from source, at
+  the same depth as the JSON decoder. A deliberately crafted file can still
+  make a load slow or large; that requires write access to the user's state
+  directory, as with the JSON file.
+- Session titles and project paths are stored exactly as the JSON index and
+  sidecar stored them. File permissions are the process default, as before.
+- Two processes that both find a corrupt database may both remove and
+  recreate it; each then rewrites a complete index, so the last writer wins.
+  Usage history is never involved.
+
 ## Returning to the baseline
 
 The baseline build reads only `analytics-v3.json`. After migration that file is
