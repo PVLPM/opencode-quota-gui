@@ -1024,6 +1024,31 @@ describe("usage snapshot: unavailable activity and storage", () => {
 });
 
 describe("usage snapshot: labels", () => {
+  it("names identity-less import sessions as unknown accounts, told apart by session", async () => {
+    const db = await store();
+    const first = series("codex-import:unknown:aa11bb22cc33", "window:five_hour|quota:percent", {
+      providerLabel: "Codex",
+    });
+    const second = series("codex-import:unknown:dd44ee55ff66", "window:five_hour|quota:percent", {
+      providerLabel: "Codex",
+    });
+    const bare = series("codex-import:unknown", "window:week|quota:percent", {
+      providerLabel: "Codex",
+    });
+    record(db, at(0), [
+      { series: first, remaining: 80 },
+      { series: second, remaining: 60 },
+      { series: bare, remaining: 50 },
+    ]);
+
+    const snapshot = await build(db, { now: () => at(1) }).usage({ range: "lifetime" });
+    expect(snapshot.accounts.map((account) => account.accountLabel).sort()).toEqual([
+      "Codex unknown account",
+      "Codex unknown account aa11bb",
+      "Codex unknown account dd44ee",
+    ]);
+  });
+
   it("uses live card labels only and neutral labels without a live card", async () => {
     const db = await store();
     const fiveHour = series("anthropic:abcdef123456", "window:five_hour|quota:percent", {

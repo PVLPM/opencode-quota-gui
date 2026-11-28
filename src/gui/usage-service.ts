@@ -248,6 +248,14 @@ function storedMetric(series: UsageSeriesInfo): AccountingMetric | undefined {
 function neutralAccountLabel(providerLabel: string, cardId: string): string {
   const separator = cardId.indexOf(":");
   const hash = separator >= 0 ? cardId.slice(separator + 1) : cardId;
+  // Identity-less imports are scoped per session (`<source>:unknown:<session>`):
+  // name them as an unknown account and tell the sessions apart by their hash.
+  if (hash === "unknown" || hash.startsWith("unknown:")) {
+    const session = hash.slice("unknown:".length);
+    return session.length > 0
+      ? `${providerLabel} unknown account ${session.slice(0, 6)}`
+      : `${providerLabel} unknown account`;
+  }
   return `${providerLabel} account ${hash.slice(0, 6)}`;
 }
 
