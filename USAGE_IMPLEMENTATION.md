@@ -229,7 +229,27 @@ Usage reads never trigger provider polling.
 
 ### Polled providers
 
-(Filled from investigation; see section maintained in workstream B.)
+Per-provider facts for the two subscription-quota providers added in v1.4.0.
+Both are ordinary `QuotaProvider` entries: they are polled by the existing
+quota collector on its configured cadence and TTL cache, and add no timer,
+loop or scheduler of their own.
+
+| Provider | Polled | Quota windows | Reset precision | Identity source | Attribution eligibility |
+|---|---|---|---|---|---|
+| Mistral Vibe (`mistral`) | Yes — one `/v1/billing/budget` read plus one `/v1/billing/subscription` read per fetch, 3 s short timeout | No typed window: the Vibe budget is a `named:Vibe budget` `budget` row (the subscription allowance), plus an optional `named:API budget` budget row that is emitted only while pay-as-you-go is enabled | `exact` — the platform's `reset_at` RFC3339 instant; no reset when it is absent or unparsable | sha256 fingerprint of the credential (never the plan, label or source): one account for one key, and the same key found in `MISTRAL_API_KEY`, `<VIBE_HOME>/.env` or an OpenCode `mistral` login stays one card | The Vibe budget row is `unattributable` (a subscription meter, not model activity); OpenCode's `mistral` activity bills the API budget row |
+| Antigravity CLI (`antigravity-cli`) | Yes — one `agy --version` probe (gate: >= 1.1.11) then one `agy --output-format json -p "/usage"` read per fetch, 30 s timeout that kills the child | The buckets the CLI reports (`weekly`, `5h`), each keyed by the CLI's own bucket id (`gemini-weekly`, `3p-weekly`, `3p-5h`); no typed window semantic, so two weekly buckets never collide | `exact` for reported timestamps; absent when the CLI reports `1970-01-01T00:00:00Z` (no reset scheduled) or no timestamp | None is proven: the CLI output carries no account identity, and the local `google_accounts.json` "active" field is not proof, so this source is its own card and is never linked to `google-agy` | None — the CLI has no OpenCode runtime id, so no recorded activity is attributed |
+
+Notification eligibility follows from those row shapes:
+
+- Mistral Vibe's budget rows are `budget` rows, so they are outside the
+  `quota`/`rate_limit` low and exhausted policy (the same outcome as OpenCode
+  Zen's monthly budget row), and they carry no typed window, so no reset
+  notification is derived from them.
+- Antigravity CLI rows are `quota` percent rows, so low and exhausted
+  notifications apply; they carry a provider row key rather than a typed window,
+  so no reset notification is derived from them.
+- Neither provider gates auto-resume: both registrations declare no auto-resume
+  binding, so their routes are rejected before the live probe.
 
 ### Opt-in history import
 
