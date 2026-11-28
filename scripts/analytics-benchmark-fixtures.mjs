@@ -76,7 +76,9 @@ export async function openDatabase(path, options = {}) {
   const readOnly = options.readOnly === true;
   if (detectRuntime() === "bun") {
     const { Database } = await import("bun:sqlite");
-    const db = new Database(path, { readonly: readOnly });
+    // `{ readonly: false }` alone resolves to no open flags (API misuse) on
+    // current Bun; the default constructor is read/write/create.
+    const db = readOnly ? new Database(path, { readonly: true }) : new Database(path);
     return readOnly ? wrapReadOnly(db) : db;
   }
   const { DatabaseSync } = await import("node:sqlite");
@@ -1096,6 +1098,9 @@ export async function appendDeltaRows(options) {
     }
     throw error;
   } finally {
+    // bun:sqlite defers close (and its WAL checkpoint) while a statement is
+    // unfinalized, which would leave a zombie writer behind every delta.
+    insert.finalize?.();
     db.close();
   }
   return {

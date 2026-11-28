@@ -62,14 +62,16 @@ import {
   defaultAnalyticsPresentationPath,
   defaultAnalyticsSnapshotPath,
   fingerprintOf,
-  loadAnalyticsPresentation,
-  loadAnalyticsSnapshot,
   type Occurrence,
   rowFromFingerprint,
-  saveAnalyticsPresentation,
-  saveAnalyticsSnapshot,
   type WarmAnalyticsPresentation,
 } from "./analytics-state.js";
+import {
+  type AnalyticsPersistDelta,
+  type AnalyticsStore,
+  createAnalyticsPersistDelta,
+  createAnalyticsStore,
+} from "./analytics-store.js";
 import { resolveHostTimeZone } from "./time-zone.js";
 
 export const ANALYTICS_REFRESH_INTERVAL_MS = 600_000;
@@ -126,7 +128,17 @@ export interface AnalyticsEngineOptions {
   /** Testable override for the persisted full-reconciliation cadence. */
   fullRepairIntervalMs?: number;
   loadSnapshot?: (path: string) => Promise<AnalyticsState | undefined>;
-  saveSnapshot?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
+  /**
+   * `delta` carries the occurrence changes since the last durable write; an
+   * incremental store takes it synchronously inside its write transaction and
+   * restores it on failure. Whole-state writers may ignore it.
+   */
+  saveSnapshot?: (
+    path: string,
+    state: AnalyticsState,
+    savedAtMs: number,
+    delta?: AnalyticsPersistDelta,
+  ) => Promise<boolean>;
   loadPresentation?: (path: string) => Promise<WarmAnalyticsPresentation | undefined>;
   savePresentation?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
   /** Host calendar zone; defaults to the machine running the worker. */
@@ -139,6 +151,8 @@ export interface AnalyticsEngineOptions {
   onGeneration?: (generation: number) => void;
   /** Bound on draining queued persistence during close. */
   closeWriteTimeoutMs?: number;
+  /** Persistence for the defaults above (SQLite beside `snapshotPath`). */
+  store?: AnalyticsStore;
 }
 
 export interface AnalyticsWorkerMemory {
@@ -364,14 +378,31 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     options.fullRepairIntervalMs !== undefined && Number.isFinite(options.fullRepairIntervalMs)
       ? Math.max(0, options.fullRepairIntervalMs)
       : ANALYTICS_FULL_REPAIR_INTERVAL_MS;
-  const loadSnapshot = options.loadSnapshot ?? loadAnalyticsSnapshot;
-  const saveSnapshot = options.saveSnapshot ?? saveAnalyticsSnapshot;
+  // The SQLite store opens lazily, and only when a default persistence path is
+  // used: injected test persistence never creates a database file.
+  let ownedStore: AnalyticsStore | undefined;
+  const store = (): AnalyticsStore => {
+    if (options.store) return options.store;
+    ownedStore ??= createAnalyticsStore({ snapshotPath });
+    return ownedStore;
+  };
+  const loadSnapshot = options.loadSnapshot ?? ((_path: string) => store().loadSnapshot());
+  const saveSnapshot =
+    options.saveSnapshot ??
+    ((_path: string, value: AnalyticsState, savedAtMs: number, delta?: AnalyticsPersistDelta) =>
+      store().saveSnapshot(value, savedAtMs, delta));
   const presentationPath =
     options.snapshotPath === undefined
       ? defaultAnalyticsPresentationPath(snapshotPath)
       : `${snapshotPath}.presentation.json`;
-  const loadPresentation = options.loadPresentation ?? loadAnalyticsPresentation;
-  const savePresentation = options.savePresentation ?? saveAnalyticsPresentation;
+  const loadPresentation =
+    options.loadPresentation ?? ((_path: string) => store().loadPresentation());
+  const savePresentation =
+    options.savePresentation ??
+    ((_path: string, value: AnalyticsState, savedAtMs: number) =>
+      store().savePresentation(value, savedAtMs));
+  /** Occurrence changes not yet in a committed index checkpoint. */
+  const persistDelta = createAnalyticsPersistDelta();
 
   // Instrumentation-only accounting; it never affects control flow or results.
   const phaseTotals = new Map<PhaseLabel, { count: number; totalMs: number }>();
@@ -529,6 +560,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (row.agent !== undefined) occurrence.agent = row.agent;
     if (row.variant !== undefined) occurrence.variant = row.variant;
     state.occurrences.set(row.messageID, occurrence);
+    persistDelta.markChanged(row.messageID);
     indexes.upsert(occurrence);
   }
 
@@ -635,6 +667,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       if (persisted) {
         state = persisted;
+        persistDelta.reset();
         coverageTrusted = true;
         const persistedIdentity = persisted.sourceIdentity;
         const warmIdentity = warmPresentation?.sourceIdentity;
@@ -1040,7 +1073,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (snapshotJob) {
         const writtenRevision = snapshotJob.revision;
         const saved = await measureAsync("persistenceWrite", () =>
-          saveSnapshot(snapshotPath, state, snapshotJob.atMs).catch(() => false),
+          saveSnapshot(snapshotPath, state, snapshotJob.atMs, persistDelta).catch(() => false),
         );
         if (saved && compactRevision === writtenRevision) {
           compactDirty = false;
@@ -2380,6 +2413,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     // Apply synchronously after the transaction has returned.
     if (candidate.replaced) {
       state.occurrences.clear();
+      persistDelta.markReplaced();
       state.fingerprints = [];
       state.fingerprintIndex.clear();
       state.extent = undefined;
@@ -2451,6 +2485,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       if (updatedAtMs !== occurrence.updatedAtMs) {
         occurrence.updatedAtMs = updatedAtMs;
+        persistDelta.markChanged(key);
         updatedAtChanged = true;
       }
       // Agent and reasoning effort are detail-only metadata projected by the
@@ -2467,7 +2502,10 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         else occurrence.agent = row.agent;
         if (row.variant === undefined) delete occurrence.variant;
         else occurrence.variant = row.variant;
-        if (nextVariantChanged) variantChanged = true;
+        if (nextVariantChanged) {
+          variantChanged = true;
+          persistDelta.markChanged(key);
+        }
         agentUpserts.push(row);
         if (wasKnown || !sourceUnchanged) agentAffectedSessionIds.add(row.sessionID);
       }
@@ -2490,6 +2528,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const row = rowOf(occurrence);
       if (row) removals.push(row);
       state.occurrences.delete(key);
+      persistDelta.markRemoved(key);
       indexes.remove(key);
       occurrenceRemoved = true;
     }
@@ -3159,6 +3198,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           });
         });
         closed = true;
+        ownedStore?.close();
         lastDetailSessionIds.clear();
         lastProjectScopes.clear();
         detailSignatures.clear();

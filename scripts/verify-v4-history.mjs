@@ -37,6 +37,7 @@ const approvedPublicDocs = new Set([
   "docs/performance/README.md",
   "docs/performance/output-schema.md",
   "docs/performance/synchronization.md",
+  "docs/performance/storage.md",
 ]);
 
 const publicImageFiles = new Set([

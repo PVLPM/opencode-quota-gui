@@ -102,6 +102,7 @@ describe("verify-v4-history: public performance docs allowlist", () => {
       "docs/performance/README.md": "# Performance\n",
       "docs/performance/output-schema.md": "# Schema\n",
       "docs/performance/synchronization.md": "# Synchronization\n",
+      "docs/performance/storage.md": "# Analytics storage\n",
       // Existing docs/readme behavior must stay allowed.
       "docs/readme/guide.md": "# Guide\n",
     });

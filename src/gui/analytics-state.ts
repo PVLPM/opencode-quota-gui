@@ -265,8 +265,24 @@ interface PersistedAnalyticsStateV3 {
   } | null;
 }
 
+/** One session's persisted columns, shared by the JSON and SQLite encoders. */
+export function sessionColumns(
+  session: OpenCodeSessionInfo,
+): PersistedAnalyticsStateV3["sessions"][number] {
+  return [
+    session.id,
+    session.title ?? null,
+    session.parentID ?? null,
+    session.projectID ?? null,
+    session.directory ?? null,
+    session.time?.created ?? null,
+    session.time?.updated ?? null,
+    session.agent ?? null,
+  ];
+}
+
 /** Stable fields only; size/mtime are informational and never persisted. */
-type SourceIdentityTuple = [
+export type SourceIdentityTuple = [
   dbPath: string,
   exists: boolean,
   status: "ok" | "missing" | "unreadable",
@@ -297,16 +313,7 @@ export function encodeAnalyticsState(
 
   const sessions: PersistedAnalyticsStateV3["sessions"] = Object.values(state.sessions)
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    .map((session) => [
-      session.id,
-      session.title ?? null,
-      session.parentID ?? null,
-      session.projectID ?? null,
-      session.directory ?? null,
-      session.time?.created ?? null,
-      session.time?.updated ?? null,
-      session.agent ?? null,
-    ]);
+    .map(sessionColumns);
 
   const projects: PersistedAnalyticsStateV3["projects"] = Object.values(state.projects)
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -341,7 +348,7 @@ export function encodeAnalyticsState(
   };
 }
 
-function identityToTuple(identity: OpenCodeSourceIdentity): SourceIdentityTuple {
+export function identityToTuple(identity: OpenCodeSourceIdentity): SourceIdentityTuple {
   return [
     identity.dbPath,
     identity.exists,
@@ -354,7 +361,7 @@ function identityToTuple(identity: OpenCodeSourceIdentity): SourceIdentityTuple 
   ];
 }
 
-function identityFromTuple(tuple: SourceIdentityTuple): OpenCodeSourceIdentity {
+export function identityFromTuple(tuple: SourceIdentityTuple): OpenCodeSourceIdentity {
   const identity: OpenCodeSourceIdentity = {
     dbPath: tuple[0],
     exists: tuple[1],
@@ -427,7 +434,7 @@ function isCompactProject(value: unknown): boolean {
   );
 }
 
-function isSourceIdentityTuple(value: unknown): value is SourceIdentityTuple {
+export function isSourceIdentityTuple(value: unknown): value is SourceIdentityTuple {
   if (!Array.isArray(value) || value.length !== 8) return false;
   if (typeof value[0] !== "string" || typeof value[1] !== "boolean") return false;
   if (value[2] !== "ok" && value[2] !== "missing" && value[2] !== "unreadable") return false;
@@ -636,7 +643,7 @@ export function defaultAnalyticsPresentationPath(snapshotPath: string): string {
   return `${snapshotPath}.presentation.json`;
 }
 
-interface PersistedPresentationFile {
+export interface PersistedPresentationFile {
   version: typeof ANALYTICS_SNAPSHOT_VERSION;
   presentationVersion: typeof ANALYTICS_PRESENTATION_VERSION;
   savedAtMs: number;
@@ -792,7 +799,7 @@ export function decodeAnalyticsPresentation(value: unknown): WarmAnalyticsPresen
 }
 
 const PRESENTATION_SIDECAR_SUFFIX = ".presentation.json";
-const PRESENTATION_MAX_SIDECAR_BYTES = 4 * 1024 * 1024;
+export const PRESENTATION_MAX_SIDECAR_BYTES = 4 * 1024 * 1024;
 
 function compactSnapshotPathForPresentationPath(path: string): string | undefined {
   if (!path.endsWith(PRESENTATION_SIDECAR_SUFFIX)) return undefined;
@@ -975,6 +982,28 @@ function errorCodeOf(error: unknown): string {
     if (typeof code === "string" && code.length > 0) return code;
   }
   return "unknown";
+}
+
+/**
+ * Removes the legacy JSON index, its presentation sidecar and their abandoned
+ * temps once the SQLite store holds a validated replacement. A temp younger
+ * than the orphan age may belong to a still-running older writer and is kept.
+ * Never throws and never touches any other file.
+ */
+export async function removeLegacyAnalyticsFiles(snapshotPath: string): Promise<number> {
+  let removed = 0;
+  for (const path of [snapshotPath, defaultAnalyticsPresentationPath(snapshotPath)]) {
+    try {
+      const stats = await lstat(path);
+      if (!stats.isFile()) continue;
+      await unlink(path);
+      removed += 1;
+    } catch {
+      // Absent or busy: nothing to reclaim now.
+    }
+  }
+  await removeOrphanedAnalyticsTemps(snapshotPath);
+  return removed;
 }
 
 /**

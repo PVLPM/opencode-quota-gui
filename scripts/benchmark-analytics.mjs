@@ -38,15 +38,7 @@
  *   OCQ_BENCH_TMP_DIR               benchmark temp parent (default <tmp>/opencode)
  */
 import { spawnSync } from "node:child_process";
-import {
-  copyFileSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -55,7 +47,6 @@ import { fileURLToPath } from "node:url";
 import {
   appendDeltaRows,
   createSyntheticDatabase,
-  DAY_MS,
   detectRuntime,
   SYNTHETIC_PROFILES,
 } from "./analytics-benchmark-fixtures.mjs";
@@ -81,6 +72,12 @@ import {
   workerStats,
 } from "./analytics-benchmark-harness.mjs";
 import { resolveRealSource, selectRealSource } from "./analytics-benchmark-real.mjs";
+import {
+  ageIndexClocks,
+  copyIndexOnly,
+  processWriteBytes,
+  storageFootprint,
+} from "./analytics-benchmark-storage.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runtime = detectRuntime();
@@ -148,6 +145,8 @@ function parseOptions(argv) {
     realLocal: false,
     help: false,
     memoryCapMiB: Number(process.env.ANALYTICS_BENCH_MEMORY_CAP_MIB ?? 100),
+    distRoot: repoRoot,
+    label: null,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -168,8 +167,23 @@ function parseOptions(argv) {
     } else if (argument === "--json-out") {
       const value = argv[index + 1];
       index += 1;
-      if (!value) throw new BenchError("bad-argument");
+      // A report path can never name a database or its journal files.
+      if (!value || !value.endsWith(".json")) throw new BenchError("bad-argument");
       options.jsonOut = value;
+    } else if (argument === "--dist-root") {
+      // A directory holding another build's `dist/` (e.g. a baseline copy), so
+      // one suite version measures two builds identically.
+      const value = argv[index + 1];
+      index += 1;
+      if (!value) throw new BenchError("bad-argument");
+      options.distRoot = resolve(value);
+    } else if (argument === "--label") {
+      const value = argv[index + 1];
+      index += 1;
+      if (!value || !/^[a-z0-9][a-z0-9._-]{0,39}$/i.test(value)) {
+        throw new BenchError("bad-argument");
+      }
+      options.label = value;
     } else if (argument === "--memory-cap-mib") {
       const value = Number(argv[index + 1]);
       index += 1;
@@ -302,14 +316,6 @@ function createAssetRoot(root) {
   return assetRoot;
 }
 
-function fileSize(path) {
-  try {
-    return statSync(path).size;
-  } catch {
-    return 0;
-  }
-}
-
 function maxNumber(...values) {
   let result = 0;
   for (const value of values) {
@@ -392,6 +398,29 @@ function emptyDelta(status, definition = null) {
   };
 }
 
+/**
+ * Persistence is queued after a refresh resolves. Wait until the worker's
+ * persistenceWrite count stops moving so a phase's write volume is complete.
+ */
+async function settlePersistence(service, quietMs = 750, maxMs = 30_000) {
+  const started = performance.now();
+  const countOf = async () =>
+    phaseSnapshot(await workerStats(service))?.persistenceWrite?.count ?? null;
+  let last = await countOf();
+  let stableSince = performance.now();
+  while (performance.now() - started < maxMs) {
+    await sleep(150);
+    const next = await countOf();
+    if (next !== last) {
+      last = next;
+      stableSince = performance.now();
+    } else if (performance.now() - stableSince >= quietMs) {
+      break;
+    }
+  }
+  return last;
+}
+
 async function measureDeltas(options) {
   const { mode, dbPath, service, targetSessionId, anchorMs, durations } = options;
   const deltas = {
@@ -401,6 +430,7 @@ async function measureDeltas(options) {
     scenarios: {},
   };
   let baseline = (await service.home({ range: "7d" })).usage.stepCount;
+  await settlePersistence(service);
   const definitions = [
     {
       name: "noChange",
@@ -457,12 +487,17 @@ async function measureDeltas(options) {
       });
       insertedRows = appended.insertedRows;
     }
+    const writeBytesBefore = processWriteBytes();
     const refreshStarted = performance.now();
     await service.refresh();
     durations[`${prefix}Refresh`] = measure(refreshStarted);
     const homeStarted = performance.now();
     const home = await service.home({ range: "7d" });
     durations[`${prefix}Home7d`] = measure(homeStarted);
+    // Write volume covers the refresh, its Home read and the queued writes,
+    // and excludes the synthetic source mutation above.
+    const persistenceWrites = await settlePersistence(service);
+    const writesAfter = processWriteBytes();
     const observedStepDelta = home.usage.stepCount - baseline;
     baseline = home.usage.stepCount;
     const expectedStepDelta = definition.insertedRows;
@@ -483,31 +518,14 @@ async function measureDeltas(options) {
       observedStepDelta,
       refreshMs: durations[`${prefix}Refresh`],
       homeMs: durations[`${prefix}Home7d`],
+      writeBytes:
+        writeBytesBefore === null || writesAfter === null ? null : writesAfter - writeBytesBefore,
+      persistenceWriteCount: persistenceWrites,
       passed,
     };
   }
   deltas.finalStepCount = baseline;
   return deltas;
-}
-
-/** Age only the isolated snapshot's cursor clocks to simulate a two-day pause. */
-function ageIsolatedSnapshot(path, days) {
-  const snapshot = JSON.parse(readFileSync(path, "utf8"));
-  const shiftMs = days * DAY_MS;
-  let sourceCursorShifted = false;
-  let repairClockShifted = false;
-  let agedSourceCursorAtMs = null;
-  if (typeof snapshot.sourceCursorAtMs === "number") {
-    snapshot.sourceCursorAtMs = Math.max(0, snapshot.sourceCursorAtMs - shiftMs);
-    sourceCursorShifted = true;
-    agedSourceCursorAtMs = snapshot.sourceCursorAtMs;
-  }
-  if (typeof snapshot.lastFullRepairAtMs === "number") {
-    snapshot.lastFullRepairAtMs = Math.max(0, snapshot.lastFullRepairAtMs - shiftMs);
-    repairClockShifted = true;
-  }
-  writeFileSync(path, `${JSON.stringify(snapshot)}\n`);
-  return { sourceCursorShifted, repairClockShifted, agedSourceCursorAtMs };
 }
 
 function emptyColdResume(status, reason = null) {
@@ -567,7 +585,7 @@ async function measureColdResume(options) {
       workerAfter: null,
     };
   }
-  if (fileSize(snapshotPath) <= 0) {
+  if (storageFootprint(snapshotPath).indexBytes <= 0) {
     return {
       result: emptyColdResume("skipped", "snapshot-unavailable"),
       workerBefore: null,
@@ -575,10 +593,11 @@ async function measureColdResume(options) {
     };
   }
 
-  const isolatedSnapshotPath = join(root, "cold-resume-analytics-v3.json");
+  // A directory of its own keeps the production file names on either backend.
+  const isolatedSnapshotPath = join(root, "cold-resume", "analytics-v3.json");
   const simulatedDays = 2;
-  copyFileSync(snapshotPath, isolatedSnapshotPath);
-  const clockShift = ageIsolatedSnapshot(isolatedSnapshotPath, simulatedDays);
+  await copyIndexOnly(snapshotPath, isolatedSnapshotPath);
+  const clockShift = await ageIndexClocks(isolatedSnapshotPath, simulatedDays);
   const cursorAvailable =
     clockShift.sourceCursorShifted && typeof clockShift.agedSourceCursorAtMs === "number";
   const resumeClockAtMs = Date.now();
@@ -688,7 +707,6 @@ async function executeProfile(options) {
   } = options;
   const assetRoot = createAssetRoot(root);
   const snapshotPath = join(root, "analytics-v3.json");
-  const presentationPath = `${snapshotPath}.presentation.json`;
   const durations = createDurations();
   const checks = {
     coldProvidersEmpty: null,
@@ -727,9 +745,13 @@ async function executeProfile(options) {
   let lifetimeSnapshot = null;
   let largeTreeSnapshot = null;
   let subSessionSnapshot = null;
+  let footprintAfterCold = null;
+  let footprintAfterDeltas = null;
+  let coldWriteBytes = null;
   const hostBaseline = hostMemory();
 
   try {
+    const writeBytesAtStart = processWriteBytes();
     const serviceA = createAnalyticsService(modules, {
       snapshotPath,
       refreshIntervalMs: 3_600_000,
@@ -803,9 +825,14 @@ async function executeProfile(options) {
     phaseWorkerMemory.coldRetained = summarizeWorkerMemory(coldRetained.stats);
     await serviceA.close();
     current.service = null;
-    const snapshotBytes = fileSize(snapshotPath);
-    const presentationBytes = fileSize(presentationPath);
-    checks.persistenceSnapshotWritten = snapshotBytes > 0;
+    footprintAfterCold = storageFootprint(snapshotPath);
+    const writeBytesAfterCold = processWriteBytes();
+    // Cold build through close: the first full index and presentation writes.
+    coldWriteBytes =
+      writeBytesAtStart === null || writeBytesAfterCold === null
+        ? null
+        : writeBytesAfterCold - writeBytesAtStart;
+    checks.persistenceSnapshotWritten = footprintAfterCold.indexBytes > 0;
 
     const serviceB = createAnalyticsService(modules, {
       snapshotPath,
@@ -862,6 +889,7 @@ async function executeProfile(options) {
     const coldResumeGapStarted = performance.now();
     await serviceB.close();
     current.service = null;
+    footprintAfterDeltas = storageFootprint(snapshotPath);
     await server.close();
     server = null;
     const hostAfterClose = hostMemory();
@@ -1033,8 +1061,12 @@ async function executeProfile(options) {
         phases: phaseWorkerMemory,
       },
       persistence: {
-        snapshotBytes,
-        presentationBytes,
+        backend: footprintAfterCold.backend,
+        afterColdClose: footprintAfterCold,
+        afterDeltasClose: footprintAfterDeltas,
+        coldWriteBytes,
+        snapshotBytes: footprintAfterCold.indexBytes,
+        presentationBytes: footprintAfterCold.jsonPresentationBytes,
         snapshotWritten: checks.persistenceSnapshotWritten,
       },
       payload: {
@@ -1167,7 +1199,7 @@ async function main() {
       for (const root of activeTempRoots) removeTempRoot(root);
       process.exit(1);
     }, suiteTimeoutMs());
-    const modules = await loadDistModules(repoRoot);
+    const modules = await loadDistModules(options.distRoot);
     const profiles = options.realLocal
       ? await runRealLocal(options, modules)
       : await runSyntheticSuite(options, modules);
@@ -1175,6 +1207,7 @@ async function main() {
       schemaVersion: 1,
       suite: "analytics-benchmark",
       mode: options.realLocal ? "real-local" : "synthetic",
+      build: { label: options.label },
       environment: {
         runtime,
         node: process.version,
