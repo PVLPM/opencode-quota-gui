@@ -29,20 +29,8 @@ export function formatPp(value: number | null | undefined): string {
   return `${value.toFixed(2)} pp`;
 }
 
-/** A measured endpoint change, never an estimate. */
+/** A measured endpoint change, never an estimate. Direction follows the mode. */
 export function observedChangeText(
-  burnPercentPoints: number | null,
-  mode: QuotaPercentMode,
-): string {
-  if (burnPercentPoints === null || !Number.isFinite(burnPercentPoints)) return "—";
-  if (burnPercentPoints === 0) return "0.00 pp";
-  return mode === "used"
-    ? `+${formatPp(burnPercentPoints)} used`
-    : `−${formatPp(burnPercentPoints)} remaining`;
-}
-
-/** The compact inline form: direction only, with the unit and mode alongside it. */
-export function observedChangeCompact(
   burnPercentPoints: number | null,
   mode: QuotaPercentMode,
 ): string {
@@ -110,9 +98,9 @@ export function coveragePercent(series: Pick<UsageWindowSeries, "axis" | "covera
   return Math.max(0, Math.min(100, (series.coverage.observedMs / span) * 100));
 }
 
-/** Estimate disclosure required wherever an attributed percentage point appears. */
+/** Estimate disclosure shown once, inside the view's info control. */
 export const ATTRIBUTION_DISCLOSURE =
-  "Attribution is an estimated split of the observed quota change using recorded OpenCode activity. Usage outside OpenCode cannot be excluded.";
+  "est. is the share attributed to recorded OpenCode activity; usage outside OpenCode is not excluded.";
 
 export function attributedText(value: number): string {
   return `${formatPp(value)} estimated`;

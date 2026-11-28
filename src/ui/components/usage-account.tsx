@@ -14,7 +14,6 @@ import {
   formatTokenCount,
   TOKEN_CATEGORIES,
 } from "../format";
-import { inlineAccountLabel } from "../quota-semantics";
 import {
   attributedText,
   coveragePercent,
@@ -24,6 +23,7 @@ import {
   UNATTRIBUTED_REASON_LABELS,
 } from "../usage-model";
 import { type UsageRunwayHint, usageRunwayKey } from "../usage-runway";
+import { CardAccountMeta } from "./card-account";
 import { CostValue } from "./cost-estimate";
 import { ProviderLogo } from "./provider-logo";
 import { UsageWindowChart } from "./usage-window-chart";
@@ -139,22 +139,11 @@ export function UsageAccountCard(props: {
           <h2 class="qg-card__provider qg-usage-account__title" id={titleId()}>
             {props.account.providerLabel}
           </h2>
-          <Show when={props.account.planLabel}>
-            {(plan) => (
-              <span class="qg-card__account">
-                <span aria-hidden="true">· </span>
-                {plan()}
-              </span>
-            )}
-          </Show>
-          <Show when={props.account.accountLabel}>
-            {(account) => (
-              <span class="qg-card__account">
-                <span aria-hidden="true">· </span>
-                {inlineAccountLabel(props.account.providerLabel, account())}
-              </span>
-            )}
-          </Show>
+          <CardAccountMeta
+            providerLabel={props.account.providerLabel}
+            planLabel={props.account.planLabel}
+            accountLabel={props.account.accountLabel}
+          />
         </div>
         <Show when={props.info}>{props.info}</Show>
       </header>

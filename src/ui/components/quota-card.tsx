@@ -25,6 +25,7 @@ import {
 } from "../quota-semantics";
 import { formatResetCountdown } from "../reset-format";
 import { visibleRows } from "../view-model";
+import { CardAccountMeta } from "./card-account";
 import { ProviderLogo } from "./provider-logo";
 
 export {
@@ -472,22 +473,11 @@ export function QuotaCardView(props: {
         <div class="qg-card__identity">
           <ProviderLogo providerId={props.card.providerId} class="qg-card__logo" />
           <span class="qg-card__provider">{props.card.providerLabel}</span>
-          <Show when={props.card.planLabel}>
-            {(plan) => (
-              <span class="qg-card__account">
-                <span aria-hidden="true">· </span>
-                {plan()}
-              </span>
-            )}
-          </Show>
-          <Show when={props.card.accountLabel}>
-            {(account) => (
-              <span class="qg-card__account">
-                <span aria-hidden="true">· </span>
-                {inlineAccountLabel(props.card.providerLabel, account())}
-              </span>
-            )}
-          </Show>
+          <CardAccountMeta
+            providerLabel={props.card.providerLabel}
+            planLabel={props.card.planLabel}
+            accountLabel={props.card.accountLabel}
+          />
         </div>
         <button
           type="button"

@@ -17,7 +17,7 @@ import { buildUsageStepGeometry } from "../usage-chart-geometry";
 import {
   displayPercent,
   formatPp,
-  observedChangeCompact,
+  observedChangeText,
   percentModeLabel,
   type QuotaPercentMode,
 } from "../usage-model";
@@ -257,7 +257,7 @@ export function UsageWindowChart(props: {
       `${percentModeLabel(props.mode)} ${formatPercentExact(displayPercent(view.remaining, props.mode))}`,
     ];
     if (view.burnPercentPoints !== null && view.burnPercentPoints > 0) {
-      parts.push(`observed change ${observedChangeCompact(view.burnPercentPoints, props.mode)}`);
+      parts.push(`observed change ${observedChangeText(view.burnPercentPoints, props.mode)}`);
     }
     if (view.attributed > 0) {
       parts.push(`estimated ${formatPp(view.attributed)}`);
@@ -315,7 +315,7 @@ export function UsageWindowChart(props: {
             class="qg-usage-window__change"
             title="Observed change across this range, from measured endpoints"
           >
-            {observedChangeCompact(props.window.totals.observedBurnPercentPoints, props.mode)}
+            {observedChangeText(props.window.totals.observedBurnPercentPoints, props.mode)}
           </span>
           <Show when={props.window.totals.attributedBurnPercentPoints > 0}>
             <span
@@ -508,9 +508,7 @@ export function UsageWindowChart(props: {
               <Show when={view().burnPercentPoints !== null && (view().burnPercentPoints ?? 0) > 0}>
                 <div class="qg-usage-tooltip__row">
                   <span>Change</span>
-                  <span>
-                    {observedChangeCompact(view().burnPercentPoints as number, props.mode)}
-                  </span>
+                  <span>{observedChangeText(view().burnPercentPoints as number, props.mode)}</span>
                 </div>
               </Show>
               <Show when={view().attributed > 0}>
