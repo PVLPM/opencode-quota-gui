@@ -183,7 +183,7 @@ describe("provider-metadata", () => {
         id: "mistral",
         autoSetup: "usually",
         authentication: "external_api_key",
-        authFallbacks: ["env_api_key", "global_opencode_config"],
+        authFallbacks: ["env_api_key"],
         quota: "remote_api",
         notes:
           "Reads the Mistral Vibe billing budget with MISTRAL_API_KEY from the environment, <VIBE_HOME>/.env or an OpenCode Mistral login",

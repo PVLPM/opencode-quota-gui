@@ -15,7 +15,7 @@
  * uses that account, so this source is never linked to another card.
  */
 import { execFile } from "node:child_process";
-import { lstat } from "node:fs/promises";
+import { access, constants, stat } from "node:fs/promises";
 import { posix, win32 } from "node:path";
 
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
@@ -220,9 +220,21 @@ function formatAgyVersion(version: AgyVersion): string {
   return `${version.major}.${version.minor}.${version.patch}`;
 }
 
-async function isFile(path: string): Promise<boolean> {
+/**
+ * Whether `path` is an executable `agy` candidate.
+ *
+ * `stat` follows symlinks, so an `agy` that is a symlink to a working
+ * executable resolves to its target instead of being rejected. Only a regular
+ * file qualifies; on non-Windows the target must also carry the execute
+ * permission. Windows keeps its existing check, where the resolved name is
+ * already the PATHEXT-matched `agy.exe`.
+ */
+async function isExecutableFile(path: string, platform: NodeJS.Platform): Promise<boolean> {
   try {
-    return (await lstat(path)).isFile();
+    const stats = await stat(path);
+    if (!stats.isFile()) return false;
+    if (platform !== "win32") await access(path, constants.X_OK);
+    return true;
   } catch {
     return false;
   }
@@ -233,20 +245,23 @@ async function isFile(path: string): Promise<boolean> {
  *
  * Every absolute `PATH` directory is checked for the platform's executable name,
  * then the Windows installer location `%LOCALAPPDATA%\agy\bin\agy.exe` is checked
- * because an already-running shell may predate the installer's PATH entry. An
- * empty or relative `PATH` entry is skipped: it would resolve against the process
- * working directory, which is not where the CLI was installed.
+ * because an already-running shell may predate the installer's PATH entry. A
+ * candidate that is not an executable regular file (a directory, a
+ * non-executable file, a broken symlink) is skipped and the search continues
+ * with the later PATH entries. An empty or relative `PATH` entry is skipped: it
+ * would resolve against the process working directory, which is not where the
+ * CLI was installed.
  */
 export async function resolveAgyBinaryPath(
   params: {
     platform?: NodeJS.Platform;
     env?: NodeJS.ProcessEnv;
-    isFile?: (path: string) => Promise<boolean>;
+    isExecutableFile?: (path: string) => Promise<boolean>;
   } = {},
 ): Promise<string | null> {
   const platform = params.platform ?? process.platform;
   const env = params.env ?? process.env;
-  const exists = params.isFile ?? isFile;
+  const exists = params.isExecutableFile ?? ((path: string) => isExecutableFile(path, platform));
   const paths = platform === "win32" ? win32 : posix;
   const names = platform === "win32" ? ["agy.exe"] : ["agy"];
   const seen = new Set<string>();
@@ -428,7 +443,7 @@ export async function readAgyUsage(
     binaryPath?: string;
     platform?: NodeJS.Platform;
     env?: NodeJS.ProcessEnv;
-    isFile?: (path: string) => Promise<boolean>;
+    isExecutableFile?: (path: string) => Promise<boolean>;
     usageTimeoutMs?: number;
     versionTimeoutMs?: number;
     nowMs?: number;
@@ -440,7 +455,9 @@ export async function readAgyUsage(
     (await resolveAgyBinaryPath({
       ...(params.platform === undefined ? {} : { platform: params.platform }),
       ...(params.env === undefined ? {} : { env: params.env }),
-      ...(params.isFile === undefined ? {} : { isFile: params.isFile }),
+      ...(params.isExecutableFile === undefined
+        ? {}
+        : { isExecutableFile: params.isExecutableFile }),
     }));
   if (!binaryPath) return { state: "not-installed" };
 
