@@ -105,10 +105,20 @@ function cardMeasuredAt(
   return fromCycle !== undefined && Number.isFinite(fromCycle) ? fromCycle : undefined;
 }
 
+/**
+ * A budget row is only recorded when the provider schedules its reset: a
+ * prepaid balance with no reset window has no periodic history to keep.
+ */
+function hasScheduledReset(row: QuotaCardRow): boolean {
+  return row.resetAtIso !== undefined && Number.isFinite(Date.parse(row.resetAtIso));
+}
+
 function isEligiblePercentRow(row: QuotaCardRow): boolean {
   return (
     row.kind === "percent" &&
-    (row.resultType === "quota" || row.resultType === "rate_limit") &&
+    (row.resultType === "quota" ||
+      row.resultType === "rate_limit" ||
+      (row.resultType === "budget" && hasScheduledReset(row))) &&
     typeof row.percentRemaining === "number" &&
     Number.isFinite(row.percentRemaining)
   );

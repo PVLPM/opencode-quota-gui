@@ -267,7 +267,8 @@ D10.2 integration (part 2):
 ### D11 No new traffic
 Capture hooks into the existing `createDelegatingSource.quota` observation
 path next to the notification observer. No provider request is added, and
-Usage reads never trigger provider polling.
+Usage reads never trigger provider polling. Budget rows with a scheduled
+reset are recorded.
 
 ## Provider capability matrix
 
