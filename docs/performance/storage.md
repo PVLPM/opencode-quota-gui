@@ -119,10 +119,12 @@ hold the last normalized provider result per cache key (a SHA-256 of the
 logical key, never credentials), replayed within the TTL and kept as
 last-good. They stay as files:
 
-- They are small and few (one file of 731 B on the measured machine). Reads
-  and atomic writes are sub-millisecond to a few milliseconds per provider
-  poll, so a shared database has nothing material to save. The benchmark
-  report gives the measured costs.
+- They are small and few (one file of 731 B on the measured machine). At that
+  size, an atomic write measured p50 1.2 ms (Bun) / 1.4 ms (Node) and a read
+  plus parse 0.4 / 0.7 ms (200 iterations, Windows). That is at most one of
+  each per provider poll, so a shared database has nothing material to save.
+  (An 8 KB entry read measured ~14 ms p50 under Bun's async `readFile` and
+  0.8 ms under Node; it is a runtime cost, not one a database would remove.)
 - They live in the disposable cache directory on purpose. Moving them into
   `usage-history.sqlite` would couple a disposable cache to the one
   irreplaceable store: a cache-schema change or cache corruption recovery
