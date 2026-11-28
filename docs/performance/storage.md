@@ -49,10 +49,32 @@ at the right tuples, so this only affects which key a later lookup finds.)
   are evicted oldest-first to keep the serialized presentation under 4 MiB.
   The JSON sidecar additionally capped itself at the compact snapshot size; the
   SQLite store keeps only the 4 MiB cap.
+- `cache_spill` is off on the store connection. Random `message_id` index
+  updates overflow SQLite's default page cache in a large write, and every
+  spill rewrites pages into the WAL. On a 1M-row synthetic index that turned a
+  ~150 MB write into ~2.8 GB. Dirty pages are now held until `COMMIT`, so a
+  write's transient memory is bounded by the pages it changes. That is
+  comparable to the JSON baseline, which serialized the whole index into one
+  string.
 - Write scheduling is unchanged: a no-change refresh does not checkpoint the
   index, exactly as before. (The JSON baseline sometimes captured a newer
   frontier because an earlier, slower write was still in flight; that was
   latency, not a contract.)
+
+## Loads
+
+- One read transaction covers the whole load, so a concurrent writer can never
+  mix two revisions into one in-memory index.
+- The load hands the worker's event loop back after each 50 ms of work. A
+  warm cached Home or Project response that arrives meanwhile is served
+  instead of waiting for the full scan. (The JSON baseline got a similar
+  window from its asynchronous file read before its synchronous parse.) The
+  slice is time-based because each event-loop turn has a fixed cost in Bun on
+  a large heap. Yielding every 4,096 rows made a 253K-row load about 60%
+  slower; 50 ms slices cost about 8%.
+- Store operations run one at a time on one connection, in call order. A
+  write queued during a load waits for the load's read transaction to end. A
+  `close()` during an operation takes effect when that operation returns.
 
 ## Migration from analytics-v3.json
 

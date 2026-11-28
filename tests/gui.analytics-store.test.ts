@@ -479,4 +479,71 @@ describe("analytics SQLite store", () => {
     expect(after?.frontierAtMs).toBe(0);
     store.close();
   });
+
+  it("yields during a large load and serializes writes queued behind it", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const builder = stateBuilder();
+    for (let index = 0; index < 40_000; index += 1) {
+      builder.set(rawRow(index % 2 ? "ses_a" : "ses_b", `bulk_${index}`, NOW - index), index);
+    }
+    const writer = createAnalyticsStore({ snapshotPath });
+    await writer.saveSnapshot(builder.state, NOW, builder.delta);
+    writer.close();
+
+    const store = createAnalyticsStore({ snapshotPath });
+    let loadSettled = false;
+    const load = store.loadSnapshot().finally(() => {
+      loadSettled = true;
+    });
+    // Issued mid-load: it waits for the read transaction instead of failing.
+    builder.state.presentation = {
+      home: { "24h": { projects: [], usage: {} } as unknown as HomeSnapshot },
+      project: [],
+    };
+    const save = store.savePresentation(builder.state, NOW + 1);
+    // The longest event-loop stall while the load is pending, relative to its
+    // whole duration: one synchronous scan would be nearly all of it.
+    const startedAt = performance.now();
+    let lastTurn = startedAt;
+    let longestStall = 0;
+    await new Promise<void>((resolve) => {
+      const tick = () => {
+        const at = performance.now();
+        longestStall = Math.max(longestStall, at - lastTurn);
+        lastTurn = at;
+        if (loadSettled) return resolve();
+        setImmediate(tick);
+      };
+      setImmediate(tick);
+    });
+    const loaded = await load;
+    expect(longestStall).toBeLessThan((performance.now() - startedAt) / 2);
+    expect(await save).toBe(true);
+    expect(loaded?.occurrences.size).toBe(40_000);
+    expect([...(loaded?.occurrences.keys() ?? [])].slice(0, 2)).toEqual(["bulk_0", "bulk_1"]);
+    expect((await store.loadPresentation())?.home["24h"]).toBeDefined();
+    store.close();
+  });
+
+  it("closes mid-load without failing and then releases the file", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const builder = stateBuilder();
+    for (let index = 0; index < 20_000; index += 1) {
+      builder.set(rawRow("ses_a", `bulk_${index}`, NOW - index), index);
+    }
+    const writer = createAnalyticsStore({ snapshotPath });
+    await writer.saveSnapshot(builder.state, NOW, builder.delta);
+    writer.close();
+
+    const store = createAnalyticsStore({ snapshotPath });
+    const load = store.loadSnapshot();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    store.close();
+    expect(await load).toBeUndefined();
+    expect(await store.saveSnapshot(builder.state, NOW + 1, undefined)).toBe(false);
+    rmSync(join(root, "analytics.sqlite"));
+    expect(existsSync(join(root, "analytics.sqlite"))).toBe(false);
+  });
 });

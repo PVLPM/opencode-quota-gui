@@ -65,6 +65,18 @@ const ANALYTICS_STORE_FILENAME = "analytics.sqlite";
 const ANALYTICS_STORE_BUSY_TIMEOUT_MS = 3_000;
 /** WAL is truncated back to this size after checkpoints (bulk writes grow it). */
 const ANALYTICS_STORE_JOURNAL_LIMIT_BYTES = 8 * 1024 * 1024;
+/**
+ * A load hands the worker's event loop back after this much work, so warm
+ * cached responses are not queued behind one long synchronous scan. It is
+ * time-based: every turn of Bun's event loop has a fixed cost on a large
+ * heap, so a row-count cadence slowed big loads by more than half.
+ */
+const ANALYTICS_STORE_LOAD_SLICE_MS = 50;
+const ANALYTICS_STORE_LOAD_CLOCK_ROWS = 1_024;
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 /**
  * Occurrence changes since the last durable index write. The engine marks
@@ -299,6 +311,7 @@ interface Statements {
   upsertOccurrence: PreparedSqliteStatement;
   insertOccurrence: PreparedSqliteStatement;
   deleteOccurrence: PreparedSqliteStatement;
+  loadOccurrences: PreparedSqliteStatement;
   upsertSession: PreparedSqliteStatement;
   deleteSession: PreparedSqliteStatement;
   upsertProject: PreparedSqliteStatement;
@@ -333,6 +346,7 @@ function prepareStatements(conn: WritableSqliteConn): Statements {
       `INSERT INTO analytics_occurrence (${occurrenceColumns}) VALUES (${occurrenceValues})`,
     ),
     deleteOccurrence: conn.prepare("DELETE FROM analytics_occurrence WHERE message_id = ?"),
+    loadOccurrences: conn.prepare("SELECT * FROM analytics_occurrence ORDER BY ord"),
     // Unchanged metadata rows are skipped so a refresh does not rewrite pages.
     upsertSession: conn.prepare(
       `INSERT INTO analytics_session (id, title, parent_id, project_id, directory, created_at, updated_at, agent)
@@ -463,6 +477,31 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
   let lastWrite: AnalyticsStoreWriteMetrics | undefined;
   let legacyCleanupDone = false;
   let closed = false;
+  /** Every operation shares one connection and runs alone, in call order. */
+  let queue: Promise<unknown> = Promise.resolve();
+  let running = false;
+
+  function exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const run = async () => {
+      running = true;
+      try {
+        return await operation();
+      } finally {
+        running = false;
+        // A close() that arrived mid-operation is completed here.
+        if (closed) closeHandle();
+      }
+    };
+    const result = queue.then(run, run);
+    queue = result.catch(() => undefined);
+    return result;
+  }
+
+  function closeHandle(): void {
+    const handle = open;
+    open = undefined;
+    handle?.conn.close();
+  }
 
   async function openOnce(): Promise<OpenStore | undefined> {
     if (closed || unsupported) return undefined;
@@ -476,6 +515,12 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
             busyTimeoutMs: ANALYTICS_STORE_BUSY_TIMEOUT_MS,
           });
           conn.exec(`PRAGMA journal_size_limit = ${ANALYTICS_STORE_JOURNAL_LIMIT_BYTES}`);
+          // Random `message_id` index updates overflow the default page cache
+          // in a large write; each spill rewrites pages to the WAL again (a
+          // 1M-row upsert measured ~2.8 GB written instead of ~150 MB). Dirty
+          // pages are held until COMMIT instead, so transient memory is bounded
+          // by the pages the transaction changes.
+          conn.exec("PRAGMA cache_spill = OFF");
           const epoch = initializeSchema(conn);
           const handle: OpenStore = {
             conn,
@@ -715,9 +760,11 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
     }
   }
 
-  function loadIndex(handle: OpenStore): AnalyticsState | undefined {
+  async function loadIndex(handle: OpenStore): Promise<AnalyticsState | undefined> {
     const { conn } = handle;
     // One read transaction: a concurrent writer can never mix two revisions.
+    // It stays open across the load's yields; store operations are serialized,
+    // so no write on this connection can start inside it.
     conn.exec("BEGIN");
     try {
       if (readMeta(handle, "index.complete") !== "1") return undefined;
@@ -843,16 +890,16 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
       const fingerprints: CompactFingerprint[] = [];
       const fingerprintIndex = new Map<string, number>();
       const occurrences = new Map<string, Occurrence>();
-      const select = handle.conn.prepare("SELECT * FROM analytics_occurrence ORDER BY ord");
-      for (const row of select.iterate<OccurrenceRow>()) {
+      // Rows are consumed in synchronous time slices; the load yields only
+      // between slices, with the read transaction still open.
+      const addRow = (row: OccurrenceRow): boolean => {
         const sessionID = str(row.session_ref);
         const provider = str(row.provider_ref);
         const model = str(row.model_ref);
         const variant = str(row.variant_ref);
-        if (typeof sessionID !== "string" || sessionID.length === 0) return undefined;
-        if (provider === undefined || model === undefined || variant === undefined)
-          return undefined;
-        if (typeof row.message_id !== "string" || row.message_id.length === 0) return undefined;
+        if (typeof sessionID !== "string" || sessionID.length === 0) return false;
+        if (provider === undefined || model === undefined || variant === undefined) return false;
+        if (typeof row.message_id !== "string" || row.message_id.length === 0) return false;
         if (
           !isFiniteNumber(row.created_at) ||
           !isFiniteNumber(row.completed_at) ||
@@ -868,7 +915,7 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
             row.cache_missing !== 2 &&
             row.cache_missing !== 3)
         ) {
-          return undefined;
+          return false;
         }
         const tuple: CompactFingerprint = [
           row.created_at,
@@ -891,7 +938,7 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
           fingerprints.push(tuple);
           fingerprintIndex.set(key, index);
         }
-        if (occurrences.has(row.message_id)) return undefined;
+        if (occurrences.has(row.message_id)) return false;
         occurrences.set(row.message_id, {
           fingerprintIndex: index,
           sessionID,
@@ -899,6 +946,32 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
           updatedAtMs: row.updated_at,
           ...(variant === null ? {} : { variant }),
         });
+        return true;
+      };
+      const rows = handle.statements.loadOccurrences.iterate<OccurrenceRow>();
+      const takeChunk = (): "done" | "more" | "invalid" => {
+        const sliceEndsAt = performance.now() + ANALYTICS_STORE_LOAD_SLICE_MS;
+        for (let taken = 1; ; taken += 1) {
+          const next = rows.next();
+          if (next.done) return "done";
+          if (!addRow(next.value)) return "invalid";
+          if (taken % ANALYTICS_STORE_LOAD_CLOCK_ROWS === 0 && performance.now() >= sliceEndsAt) {
+            return "more";
+          }
+        }
+      };
+      for (;;) {
+        const status = takeChunk();
+        if (status === "done") break;
+        if (status === "invalid") {
+          rows.return?.();
+          return undefined;
+        }
+        await yieldToEventLoop();
+        if (closed) {
+          rows.return?.();
+          return undefined;
+        }
       }
 
       const state: AnalyticsState = {
@@ -1048,70 +1121,86 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
   return {
     path,
 
-    async loadSnapshot() {
-      const handle = await openOnce();
-      if (!handle) return unsupported ? undefined : await loadAnalyticsSnapshot(snapshotPath);
-      try {
-        const loaded = loadIndex(handle);
-        if (loaded) {
-          await cleanupLegacyOnce();
-          return loaded;
+    loadSnapshot() {
+      return exclusive(async () => {
+        const handle = await openOnce();
+        if (!handle) return unsupported ? undefined : await loadAnalyticsSnapshot(snapshotPath);
+        try {
+          const loaded = await loadIndex(handle);
+          if (loaded) {
+            await cleanupLegacyOnce();
+            return loaded;
+          }
+        } catch (error) {
+          await discardIfCorrupt(error);
+          return undefined;
         }
-      } catch (error) {
-        await discardIfCorrupt(error);
-        return undefined;
-      }
-      return await migrateLegacyIndex(handle);
+        if (closed) return undefined;
+        return await migrateLegacyIndex(handle);
+      });
     },
 
-    async saveSnapshot(state, savedAtMs, delta) {
-      const handle = await openOnce();
-      if (!handle) return false;
-      try {
-        writeIndex(handle, state, savedAtMs, delta);
-      } catch (error) {
-        await discardIfCorrupt(error);
-        return false;
-      }
-      await cleanupLegacyOnce();
-      return true;
-    },
-
-    async loadPresentation() {
-      const handle = await openOnce();
-      if (!handle) return undefined;
-      try {
-        const file = readPresentationFile(handle);
-        if (file !== undefined) return decodeAnalyticsPresentation(file);
-      } catch (error) {
-        await discardIfCorrupt(error);
-        return undefined;
-      }
-      // First run after the upgrade: import a valid legacy sidecar so the first
-      // view stays warm. The file itself is removed with the legacy index.
-      if (!existsSync(legacyPresentationPath)) return undefined;
-      try {
-        const parsed = JSON.parse(await readFile(legacyPresentationPath, "utf8")) as unknown;
-        const decoded = decodeAnalyticsPresentation(parsed);
-        if (!decoded) return undefined;
-        writePresentationFile(handle, parsed as PersistedPresentationFile);
-        return decoded;
-      } catch (error) {
-        await discardIfCorrupt(error);
-        return undefined;
-      }
-    },
-
-    async savePresentation(state, savedAtMs) {
-      const handle = await openOnce();
-      if (!handle) return false;
-      try {
-        writePresentationFile(handle, encodeAnalyticsPresentation(state, savedAtMs));
+    saveSnapshot(state, savedAtMs, delta) {
+      return exclusive(async () => {
+        const handle = await openOnce();
+        if (!handle) return false;
+        try {
+          writeIndex(handle, state, savedAtMs, delta);
+        } catch (error) {
+          await discardIfCorrupt(error);
+          return false;
+        }
+        await cleanupLegacyOnce();
         return true;
-      } catch (error) {
-        await discardIfCorrupt(error);
-        return false;
+      });
+    },
+
+    loadPresentation() {
+      return exclusive(async () => {
+        const handle = await openOnce();
+        if (!handle) return undefined;
+        try {
+          const file = readPresentationFile(handle);
+          if (file !== undefined) return decodeAnalyticsPresentation(file);
+        } catch (error) {
+          await discardIfCorrupt(error);
+          return undefined;
+        }
+        // First run after the upgrade: import a valid legacy sidecar so the first
+        // view stays warm. The file itself is removed with the legacy index.
+        if (!existsSync(legacyPresentationPath)) return undefined;
+        try {
+          const parsed = JSON.parse(await readFile(legacyPresentationPath, "utf8")) as unknown;
+          const decoded = decodeAnalyticsPresentation(parsed);
+          if (!decoded) return undefined;
+          writePresentationFile(handle, parsed as PersistedPresentationFile);
+          return decoded;
+        } catch (error) {
+          await discardIfCorrupt(error);
+          return undefined;
+        }
+      });
+    },
+
+    savePresentation(state, savedAtMs) {
+      // Encode now: a write queued behind a load must not pick up a newer state.
+      let file: PersistedPresentationFile;
+      try {
+        file = encodeAnalyticsPresentation(state, savedAtMs);
+      } catch {
+        return Promise.resolve(false);
       }
+      return exclusive(async () => {
+        const handle = await openOnce();
+        if (!handle) return false;
+        try {
+          writePresentationFile(handle, file);
+          return true;
+        } catch (error) {
+          await discardIfCorrupt(error);
+          return false;
+        }
+      });
     },
 
     lastWrite() {
@@ -1120,9 +1209,8 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
 
     close() {
       closed = true;
-      const handle = open;
-      open = undefined;
-      handle?.conn.close();
+      // An operation in flight finishes on its handle and closes it after.
+      if (!running) closeHandle();
     },
   };
 }
