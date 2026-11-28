@@ -17,6 +17,7 @@ import {
 import {
   isAnalyticsGroupSnapshot,
   isDashboardHealth,
+  isDeleteImportedHistoryResult,
   isHomeSnapshot,
   isImportPreview,
   isJsonValue,
@@ -28,7 +29,12 @@ import {
   isUsageSnapshot,
 } from "./contracts/dto-guards.js";
 import { isRangeKey, type RangeKey } from "./contracts/ranges.js";
-import { isUsageRangeKey, type UsageQuery } from "./contracts/usage.js";
+import {
+  isUsageImportHarness,
+  isUsageRangeKey,
+  type UsageImportHarness,
+  type UsageQuery,
+} from "./contracts/usage.js";
 import {
   isQuotaDialogCommand,
   type QuotaDialogCommandId,
@@ -201,6 +207,7 @@ export type DashboardRpcSaveVisibilityInput = {
   expectedRevision: string;
 };
 export type DashboardRpcImportApplyInput = { expectedRevision: string };
+export type DashboardRpcDeleteImportedHistoryInput = { harness: UsageImportHarness };
 export type DashboardRpcWatchInput = {
   scope: DashboardRpcViewScope;
   /** Optional for older callers; Native uses it to correlate the source cutover snapshot. */
@@ -617,6 +624,16 @@ export const DashboardRpc = {
       output: schema<DashboardRpcOpenSettingsOutput>((value) =>
         isObject(value) && value.opened === true ? null : "output must report opened",
       ),
+      errors: DASHBOARD_RPC_ERRORS,
+    },
+    deleteImportedHistory: {
+      input: schema<DashboardRpcDeleteImportedHistoryInput>((value) => {
+        if (!isObject(value) || !hasExactKeys(value, ["harness"])) {
+          return "input must contain only harness";
+        }
+        return isUsageImportHarness(value.harness) ? null : "harness must be claude-code or codex";
+      }),
+      output: output(isDeleteImportedHistoryResult),
       errors: DASHBOARD_RPC_ERRORS,
     },
     watch: {

@@ -21,6 +21,7 @@ import type {
   DashboardDataSource,
   DashboardEvent,
   DashboardHealth,
+  DeleteImportedHistoryResult,
   HomeSnapshot,
   ImportPreview,
   JsonValue,
@@ -32,7 +33,7 @@ import type {
 } from "../contracts/dashboard.js";
 import { isDashboardEvent } from "../contracts/guards.js";
 import type { RangeKey } from "../contracts/ranges.js";
-import type { UsageQuery, UsageSnapshot } from "../contracts/usage.js";
+import type { UsageImportHarness, UsageQuery, UsageSnapshot } from "../contracts/usage.js";
 import type {
   DashboardRpcCacheObserverEvent,
   DashboardRpcEventData,
@@ -99,6 +100,10 @@ export interface DashboardRpcCaller {
     input: DashboardRpcNoInput,
     options?: DashboardRpcCallOptions,
   ): Promise<{ opened: true }>;
+  deleteImportedHistory(
+    input: { harness: UsageImportHarness },
+    options?: DashboardRpcCallOptions,
+  ): Promise<DeleteImportedHistoryResult>;
   watch(
     input: DashboardRpcWatchInput,
     options?: DashboardRpcCallOptions,
@@ -446,6 +451,9 @@ export function createNativeDashboardClient(
     },
     async openSettingsFile() {
       await rpc.openSettingsFile({});
+    },
+    async deleteImportedHistory(harness) {
+      return rpc.deleteImportedHistory({ harness });
     },
 
     connection: () => state,

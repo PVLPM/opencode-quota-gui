@@ -278,6 +278,44 @@ D10.2 integration (part 2):
   consumed metadata (hashed thread/account keys, counters, sanitized
   model/effort).
 
+### D10.3 Privacy and retention
+
+- Harness files are opened read-only. No transcript, directory or harness
+  database is ever written, renamed or deleted; the only deletion this feature
+  performs is on rows in the plugin's own `usage-history.sqlite`.
+- Only whitelisted metadata is stored: timestamps, model, effort, token
+  counters, and Codex `rate_limits` observations (used percent, window minutes,
+  reset instant or offset, reset precision, hashed limit id). Prompts,
+  responses, tool payloads, file contents, paths and account/plan display
+  labels are never persisted.
+- Identifiers are domain-separated unsalted SHA-256 hashes over the raw id
+  (`hashUsageImport(<domain>, id)`). They are linkable by anyone who already
+  knows the raw id and are not reversible; session, message and thread keys
+  exist only for deduplication and for excluding OpenCode-owned Claude Agent
+  records.
+- Whole transcript lines are parsed in memory only, far enough to extract the
+  fields above, and then dropped; between runs nothing survives except the
+  cursor and the hash-only exclusion set.
+- There is no time-based retention. Imported rows stay until they are deleted,
+  and turning an import switch off keeps everything already imported.
+- The per-harness **Delete imported history** action in Settings removes that
+  harness's `usage_import_invocations` and `usage_import_invocation_keys` rows,
+  its Codex `codex-import` series with their runs, interruptions and conflicts,
+  and its `import_state:<harness>` cursor, in one SQLite transaction that rolls
+  back on failure. Live polled history and the other harness are untouched. The
+  hash-only exclusion set is kept: it holds OpenCode's own Claude Agent
+  identities and must still apply to a future re-import, so it is not
+  harness-scoped import data.
+- The deletion shares the importer's single-flight: a scan that already started
+  finishes first and its rows are part of what is removed, and no scan starts
+  until the transaction has committed, so an in-flight import can never
+  re-insert rows behind the delete. Removing the cursor makes a later run
+  re-read from offset 0, which stays idempotent through the dedupe keys. The
+  action never changes the switch, so a harness that is still enabled re-imports
+  on its next opportunity.
+- Responses and logs carry counts only (deleted invocations, deleted imported
+  rate-limit series); no path, hash, identifier or row content is returned.
+
 ### D11 No new traffic
 Capture hooks into the existing `createDelegatingSource.quota` observation
 path next to the notification observer. No provider request is added, and
@@ -319,7 +357,9 @@ Notification eligibility follows from those row shapes:
 
 Import limitations:
 
-- Settings-only in this lane; no Usage-view controls were added.
+- Settings-only: the import switches and the per-harness "Delete imported
+  history" action live on the Settings page; the Usage view has no import
+  controls.
 - Codex `.jsonl.zst` archived rollouts are skipped; only plain `.jsonl` is read.
 - Imported Codex rate-limit runs are written by a synthetic `codex-import`
   cycle with no linked live polling, so intervals between them render as

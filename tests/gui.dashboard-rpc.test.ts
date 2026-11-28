@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AnalyticsGroupSnapshot,
   DashboardEvent,
+  DeleteImportedHistoryResult,
   GuiSettingsStore,
   HomeSnapshot,
+  ImportedHistoryDeleter,
   ImportPreview,
   ProjectSnapshot,
   QuotaSnapshot,
@@ -144,6 +146,7 @@ function createFakeRuntime() {
       return { release };
     }),
     notifySettingsChanged: vi.fn(),
+    notifyUsageChanged: vi.fn(),
   } as unknown as SnapshotService;
   const settings = {
     settings: vi.fn(async () => ({ revision: "rev-1" }) as unknown as SettingsSnapshot),
@@ -153,12 +156,23 @@ function createFakeRuntime() {
     importApply: vi.fn(async () => ({ revision: "rev-4" }) as unknown as SettingsWriteResult),
     openSettingsFile: vi.fn(async () => undefined),
   } as unknown as GuiSettingsStore;
-  const runtime: DashboardRpcRuntime = { snapshots, settings };
+  const usage: ImportedHistoryDeleter & {
+    deleteImportedHistory: ReturnType<typeof vi.fn>;
+  } = {
+    deleteImportedHistory: vi.fn(
+      async (): Promise<DeleteImportedHistoryResult> => ({
+        invocations: 3,
+        rateLimitSeries: 1,
+      }),
+    ),
+  };
+  const runtime: DashboardRpcRuntime = { snapshots, settings, usage };
 
   return {
     runtime,
     snapshots,
     settings,
+    usage,
     released,
     emit(event: DashboardEvent) {
       for (const listener of listeners) listener(event);
@@ -291,6 +305,36 @@ describe("dashboard RPC handlers", () => {
     try {
       const captured = registrar.read();
       const result = await call(captured, "openSettingsFile", {});
+      expect(result).toEqual({
+        type: "config-target-error",
+        message: "The dashboard config path is not writable",
+        data: {},
+      });
+    } finally {
+      await received.dispose();
+    }
+  });
+
+  it("routes imported-history deletion through the usage seam and refreshes Usage only", async () => {
+    const { captured, fake } = await setup();
+
+    const result = await call(captured, "deleteImportedHistory", { harness: "codex" });
+
+    expect(result).toEqual({ invocations: 3, rateLimitSeries: 1 });
+    expect(fake.usage.deleteImportedHistory).toHaveBeenCalledWith("codex");
+    // Imported activity feeds the Usage read, so that is what is invalidated;
+    // the settings file was never written.
+    expect(fake.snapshots.notifyUsageChanged).toHaveBeenCalledOnce();
+    expect(fake.snapshots.notifySettingsChanged).not.toHaveBeenCalled();
+  });
+
+  it("reports a typed error when the usage recorder seam is absent", async () => {
+    const registrar = createFakeRegistrar();
+    const fake = createFakeRuntime();
+    const runtime: DashboardRpcRuntime = { snapshots: fake.snapshots, settings: fake.settings };
+    const received = await registerDashboardRpc({ register: registrar.register }, runtime);
+    try {
+      const result = await call(registrar.read(), "deleteImportedHistory", { harness: "codex" });
       expect(result).toEqual({
         type: "config-target-error",
         message: "The dashboard config path is not writable",

@@ -28,7 +28,12 @@ import type {
 import type { Rpc } from "@opencode/plugin/rpc";
 
 import { BUILD_IDENTITY } from "../contracts/build-identity.js";
-import type { DashboardEvent, DashboardHealth, GuiSettingsStore } from "../contracts/dashboard.js";
+import type {
+  DashboardEvent,
+  DashboardHealth,
+  GuiSettingsStore,
+  ImportedHistoryDeleter,
+} from "../contracts/dashboard.js";
 import {
   DASHBOARD_HEALTH,
   DashboardRpc,
@@ -57,6 +62,8 @@ export interface DashboardRpcRuntime {
   readonly settings: GuiSettingsStore;
   /** Optional host observer; its safe events use their own dashboard channel. */
   readonly quotaNotifications?: Pick<QuotaNotificationObserver, "subscribe">;
+  /** Optional usage recorder; the only path to the imported-history delete. */
+  readonly usage?: ImportedHistoryDeleter;
 }
 
 /** The complete OpenCode location whose event stream this transport serves. */
@@ -320,6 +327,20 @@ function createHandlers(
         }
         await open();
         return { opened: true };
+      }),
+    deleteImportedHistory: (input, context) =>
+      guard(context, async () => {
+        const usage = runtime.usage;
+        if (!usage) {
+          throw new GuiSettingsError(
+            "config-target-error",
+            "Deleting imported history is not available",
+          );
+        }
+        const result = await usage.deleteImportedHistory(input.harness);
+        // The deleted rows feed the Usage read; settings are untouched.
+        runtime.snapshots.notifyUsageChanged();
+        return result;
       }),
     watch,
   } satisfies RpcHandlers<typeof DashboardRpc>;

@@ -7,6 +7,7 @@ import type {
   CostedTokens,
   GuiSettingsStore,
   HomeSnapshot,
+  ImportedHistoryDeleter,
   ImportPreview,
   JsonValue,
   ProjectSnapshot,
@@ -16,6 +17,7 @@ import type {
 } from "../src/contracts/dashboard.js";
 import type { RangeKey } from "../src/contracts/ranges.js";
 import { planRangeBuckets, rangeBucketUnit, rangeWindow } from "../src/contracts/ranges.js";
+import type { UsageImportHarness } from "../src/contracts/usage.js";
 import { createGuiLogger } from "../src/gui/log.js";
 import {
   createDashboardServer,
@@ -102,6 +104,9 @@ function sessionSnapshot(sessionId: string): SessionSnapshot {
 interface Fixtures {
   source: SnapshotSource;
   store: GuiSettingsStore;
+  usage: ImportedHistoryDeleter;
+  /** Harnesses the fake delete seam was asked to remove, in call order. */
+  deleteCalls: UsageImportHarness[];
 }
 
 function buildFixtures(): Fixtures {
@@ -148,7 +153,14 @@ function buildFixtures(): Fixtures {
       warnings: [],
     }),
   };
-  return { source, store };
+  const deleteCalls: UsageImportHarness[] = [];
+  const usage: ImportedHistoryDeleter = {
+    deleteImportedHistory: async (harness) => {
+      deleteCalls.push(harness);
+      return { invocations: 2, rateLimitSeries: 0 };
+    },
+  };
+  return { source, store, usage, deleteCalls };
 }
 
 let baseDir = "";
@@ -174,15 +186,24 @@ afterAll(async () => {
   if (baseDir) await rm(baseDir, { recursive: true, force: true });
 });
 
-async function start(): Promise<DashboardServerHandle> {
-  const { source, store } = buildFixtures();
-  return startTestDashboardServer({
+async function startFixtures(): Promise<{
+  handle: DashboardServerHandle;
+  fixtures: Fixtures;
+}> {
+  const fixtures = buildFixtures();
+  const handle = await startTestDashboardServer({
     port: 0,
-    source,
-    settings: store,
+    source: fixtures.source,
+    settings: fixtures.store,
+    usage: fixtures.usage,
     assetRoot,
     logger: createGuiLogger({ sink: () => {} }),
   });
+  return { handle, fixtures };
+}
+
+async function start(): Promise<DashboardServerHandle> {
+  return (await startFixtures()).handle;
 }
 
 function base(port: number): string {
@@ -223,6 +244,19 @@ function raw(
 function put(port: number, path: string, payload: JsonValue, headers: Record<string, string> = {}) {
   return fetch(`${base(port)}${path}`, {
     method: "PUT",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(payload),
+  });
+}
+
+function post(
+  port: number,
+  path: string,
+  payload: JsonValue,
+  headers: Record<string, string> = {},
+) {
+  return fetch(`${base(port)}${path}`, {
+    method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(payload),
   });
@@ -320,6 +354,79 @@ describe("GUI server security", () => {
         origin: `http://127.0.0.1:${handle.port}`,
       });
       expect(writeCors.headers.get("access-control-allow-origin")).toBeNull();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("applies the write guards to imported-history deletion, which has no other authorisation", async () => {
+    const { handle, fixtures } = await startFixtures();
+    const endpoint = "/api/v1/imported-history/delete";
+    try {
+      // A cross-origin page cannot delete history, and a rejected request never
+      // reaches the store seam.
+      const foreignOrigin = await post(
+        handle.port,
+        endpoint,
+        { harness: "codex" },
+        { origin: "http://evil.example" },
+      );
+      expect(foreignOrigin.status).toBe(403);
+      expect(await foreignOrigin.json()).toMatchObject({ error: { code: "bad-origin" } });
+
+      const crossSite = await post(
+        handle.port,
+        endpoint,
+        { harness: "codex" },
+        { "sec-fetch-site": "cross-site" },
+      );
+      expect(crossSite.status).toBe(403);
+
+      // A request addressed to a foreign authority is not served at all.
+      const foreignHost = await raw(handle.port, {
+        method: "POST",
+        path: endpoint,
+        headers: { host: "evil.example:4144", "content-type": "application/json" },
+        body: JSON.stringify({ harness: "codex" }),
+      });
+      expect(foreignHost.status).toBe(403);
+      expect(JSON.parse(foreignHost.body)).toMatchObject({ error: { code: "bad-host" } });
+
+      // Only the JSON POST route exists: no GET, no form post.
+      const wrongMethod = await raw(handle.port, { path: endpoint });
+      expect(wrongMethod.status).toBe(405);
+
+      const formPost = await fetch(`${base(handle.port)}${endpoint}`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "harness=codex",
+      });
+      expect(formPost.status).toBe(415);
+
+      // Only the documented harnesses, with no extra fields.
+      const unknownHarness = await post(handle.port, endpoint, { harness: "other" });
+      expect(unknownHarness.status).toBe(400);
+      const extraField = await post(handle.port, endpoint, { harness: "codex", extra: true });
+      expect(extraField.status).toBe(400);
+
+      expect(fixtures.deleteCalls).toEqual([]);
+
+      const accepted = await post(handle.port, endpoint, { harness: "claude-code" });
+      expect(accepted.status).toBe(200);
+      expect(await accepted.json()).toEqual({ invocations: 2, rateLimitSeries: 0 });
+      expect(fixtures.deleteCalls).toEqual(["claude-code"]);
+
+      const sameOrigin = await post(
+        handle.port,
+        endpoint,
+        { harness: "codex" },
+        {
+          origin: `http://127.0.0.1:${handle.port}`,
+          "sec-fetch-site": "same-origin",
+        },
+      );
+      expect(sameOrigin.status).toBe(200);
+      expect(fixtures.deleteCalls).toEqual(["claude-code", "codex"]);
     } finally {
       await handle.close();
     }

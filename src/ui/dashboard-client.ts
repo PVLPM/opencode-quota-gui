@@ -59,10 +59,12 @@ import type {
 } from "../contracts/temporal";
 import {
   isUsageRangeKey,
+  USAGE_IMPORT_HARNESSES,
   type UsageAccount,
   type UsageActivity,
   type UsageBreakdownRow,
   type UsageCoverage,
+  type UsageImportHarness,
   type UsageInterval,
   type UsageLink,
   type UsageModelKey,
@@ -263,10 +265,6 @@ const USAGE_UNATTRIBUTED_REASONS = [
   "unobserved-interval",
   "unidentified-activity",
 ] as const satisfies readonly UsageInterval["unattributedReason"][];
-const USAGE_IMPORT_HARNESSES = [
-  "claude-code",
-  "codex",
-] as const satisfies readonly UsageSnapshot["imports"][number]["harness"][];
 const USAGE_IMPORT_STATUSES = [
   "disabled",
   "ok",
@@ -2127,7 +2125,8 @@ type DashboardWriteBody =
   | { scope: ActiveViewScope }
   | Parameters<DashboardDataSource["saveSettings"]>[0]
   | Parameters<DashboardDataSource["saveVisibility"]>[0]
-  | Parameters<DashboardDataSource["importApply"]>[0];
+  | Parameters<DashboardDataSource["importApply"]>[0]
+  | { harness: UsageImportHarness };
 
 export interface DashboardClientOptions {
   /** Defaults to the page origin: the dashboard is same-origin by construction. */
@@ -2276,6 +2275,31 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
         await write("/api/v1/settings/import", input, "POST"),
         "/api/v1/settings/import",
       );
+    },
+
+    async deleteImportedHistory(harness) {
+      const endpoint = "/api/v1/imported-history/delete";
+      const root = readRecord(
+        await write(endpoint, { harness }, "POST"),
+        endpoint,
+        "not an object",
+      );
+      return {
+        invocations: readIntegerInRange(
+          root.invocations,
+          endpoint,
+          "invocations",
+          0,
+          Number.MAX_SAFE_INTEGER,
+        ),
+        rateLimitSeries: readIntegerInRange(
+          root.rateLimitSeries,
+          endpoint,
+          "rateLimitSeries",
+          0,
+          Number.MAX_SAFE_INTEGER,
+        ),
+      };
     },
 
     subscribe(onEvent: (event: DashboardEvent) => void) {

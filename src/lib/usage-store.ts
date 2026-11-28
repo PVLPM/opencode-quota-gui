@@ -10,8 +10,19 @@
  * idempotently collapse the same measurement. A unique index cannot model
  * aggregated runs: a split leaves two rows sharing an endpoint.
  */
-import type { AccountingMetric, AccountingUnit, CostedTokens } from "../contracts/dashboard.js";
-import type { UsageMeasurementKind, UsageResetPrecision, UsageSource } from "../contracts/usage.js";
+import type {
+  AccountingMetric,
+  AccountingUnit,
+  CostedTokens,
+  DeleteImportedHistoryResult,
+} from "../contracts/dashboard.js";
+import {
+  USAGE_IMPORT_HARNESSES,
+  type UsageImportHarness,
+  type UsageMeasurementKind,
+  type UsageResetPrecision,
+  type UsageSource,
+} from "../contracts/usage.js";
 import type {
   UsageActivityEntry,
   UsageActivityQuery,
@@ -272,8 +283,6 @@ export interface UsageHistorySlice {
   presenceSpans: UsagePresenceSpan[];
 }
 
-export const USAGE_IMPORT_HARNESSES = ["claude-code", "codex"] as const;
-export type UsageImportHarness = (typeof USAGE_IMPORT_HARNESSES)[number];
 export type UsageImportStatusKind = "ok" | "unavailable" | "error";
 
 /** Persisted per-harness importer state; opaque cursors stay JSON text. */
@@ -342,6 +351,15 @@ export interface UsageStore extends UsageReadStore {
   recordCodexRateLimitObservations(observations: readonly UsageImportedCodexRateLimit[]): void;
   /** Hash-only cross-harness exclusion set; Claude Code session/message keys. */
   addImportExclusionKeys(keys: readonly string[]): void;
+  /**
+   * Delete every row one imported harness owns in one transaction: its
+   * invocations and dedupe keys, its imported Codex rate-limit series with
+   * their runs, interruptions and conflicts, and its persisted import cursor.
+   * Polled (live) history and the other harness are untouched, and the
+   * hash-only exclusion set is kept because it describes OpenCode's own
+   * Claude Agent identities, not the imported rows.
+   */
+  deleteImportedHistory(harness: UsageImportHarness): DeleteImportedHistoryResult;
   getImportState(harness: UsageImportHarness): UsageImportState | undefined;
   setImportState(harness: UsageImportHarness, state: UsageImportState): void;
   /** Priced imported activity, aligned with the given query intervals. */
@@ -1484,6 +1502,74 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     }
   }
 
+  /**
+   * One harness's imported data is removed in a single write transaction, so a
+   * reader never sees a half-deleted import: rows (invocations and their dedupe
+   * keys), the Codex `codex-import` series with every run, interruption and
+   * conflict that references one, and the persisted cursor. The exclusion set
+   * is deliberately kept: it holds hashes of OpenCode's own Claude Agent
+   * session/message identities and stays correct for a future re-import.
+   * Polled series carry no import provenance and are never matched here.
+   */
+  function deleteImportedHistory(harness: UsageImportHarness): DeleteImportedHistoryResult {
+    const codexImport = harness === "codex";
+    conn.exec("BEGIN IMMEDIATE");
+    try {
+      const invocations =
+        conn.get<{ total: number }>(
+          "SELECT COUNT(*) AS total FROM usage_import_invocations WHERE harness = ?",
+          [harness],
+        )?.total ?? 0;
+      conn.run("DELETE FROM usage_import_invocation_keys WHERE harness = ?", [harness]);
+      conn.run("DELETE FROM usage_import_invocations WHERE harness = ?", [harness]);
+      let rateLimitSeries = 0;
+      if (codexImport) {
+        // Every write path sets all three identities, so matching all of them
+        // keeps the deletion complete without ever reaching a polled series.
+        const importedSeries = `SELECT series_id FROM usage_series
+           WHERE source = ? OR provider_id = ? OR card_id GLOB ?`;
+        const importedParams = [
+          CODEX_IMPORT_PROVIDER,
+          CODEX_IMPORT_PROVIDER,
+          `${CODEX_IMPORT_PROVIDER}:*`,
+        ];
+        rateLimitSeries =
+          conn.get<{ total: number }>(
+            `SELECT COUNT(*) AS total FROM usage_series
+             WHERE source = ? OR provider_id = ? OR card_id GLOB ?`,
+            importedParams,
+          )?.total ?? 0;
+        conn.run(
+          `DELETE FROM usage_conflicts WHERE series_id IN (${importedSeries})`,
+          importedParams,
+        );
+        conn.run(`DELETE FROM usage_runs WHERE series_id IN (${importedSeries})`, importedParams);
+        conn.run("DELETE FROM usage_interruptions WHERE provider_id = ? OR card_id GLOB ?", [
+          CODEX_IMPORT_PROVIDER,
+          `${CODEX_IMPORT_PROVIDER}:*`,
+        ]);
+        conn.run(
+          `DELETE FROM usage_series
+           WHERE source = ? OR provider_id = ? OR card_id GLOB ?`,
+          importedParams,
+        );
+      }
+      // Removing the cursor row is what makes a later run re-read from offset 0:
+      // the importer only resumes a persisted cursor, and re-reading is
+      // idempotent through the dedupe keys.
+      conn.run("DELETE FROM usage_meta WHERE key = ?", [`import_state:${harness}`]);
+      conn.exec("COMMIT");
+      return { invocations, rateLimitSeries };
+    } catch (error) {
+      try {
+        conn.exec("ROLLBACK");
+      } catch {
+        // the original failure is the one worth reporting
+      }
+      throw error;
+    }
+  }
+
   function getImportState(harness: UsageImportHarness): UsageImportState | undefined {
     const row = conn.get<{ value: string }>("SELECT value FROM usage_meta WHERE key = ?", [
       `import_state:${harness}`,
@@ -1739,6 +1825,7 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     recordImportedInvocations,
     recordCodexRateLimitObservations,
     addImportExclusionKeys,
+    deleteImportedHistory,
     getImportState,
     setImportState,
     queryImportedActivity,
