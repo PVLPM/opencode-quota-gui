@@ -131,7 +131,11 @@ export interface AnalyticsEngineOptions {
   savePresentation?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
   /** Host calendar zone; defaults to the machine running the worker. */
   timeZone?: string;
-  /** Host notification after a refresh produced a new data generation. */
+  /**
+   * Host notification after a refresh produced a new data generation, changed a
+   * cached scope, or changed activity coverage. The last case keeps no indexed
+   * row change, so `generation` may repeat the previous value.
+   */
   onGeneration?: (generation: number) => void;
   /** Bound on draining queued persistence during close. */
   closeWriteTimeoutMs?: number;
@@ -829,6 +833,24 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       coverage: { complete: covered, stale: isStale(atMs) },
       refreshNow: span !== undefined && trusted && !covered,
     };
+  }
+
+  /**
+   * Everything `activityCoverage` derives from, for span-independent comparison.
+   * A change here re-certifies activity reads that previously fell outside the
+   * index, so the host must re-derive its Usage attribution even though no
+   * indexed row changed.
+   */
+  function coverageSignature(atMs: number): string {
+    return [
+      indexLoaded ? "1" : "0",
+      coverageTrusted ? "1" : "0",
+      sidecarNewerThanIndex ? "1" : "0",
+      unavailable ? "1" : "0",
+      state.extent?.sinceMs ?? "",
+      state.extent?.untilMs ?? "",
+      isStale(atMs) ? "1" : "0",
+    ].join("|");
   }
 
   /** Smallest range whose rolling window still starts at/before `sinceMs`. */
@@ -2288,6 +2310,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const priorFutureCompletionAtMs = state.futureCompletionAtMs;
     const priorExtentSinceMs = state.extent?.sinceMs;
     const priorSourceIdentity = state.sourceIdentity;
+    const priorCoverage = coverageSignature(atMs);
     if (job.globalRange !== undefined) lastGlobalAttemptAtMs = atMs;
     else lastScopedAttemptAtMs = atMs;
 
@@ -2587,6 +2610,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       if (invalidateCachedSessions(affectedSessionIds)) sessionCacheInvalidated = true;
     }
+    // Activity coverage is invisible in the indexed rows but decides whether the
+    // host may certify an activity read, so a coverage-only batch must reach it.
+    const coverageChanged = coverageSignature(atMs) !== priorCoverage;
     if (dataChanged || candidate.extentChanged || sessionCacheInvalidated) {
       generation += 1;
       // Extending empty coverage is not a visible data change; keep the sidecar
@@ -2652,7 +2678,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (hasUsefulPresentation() || sessionCacheInvalidated || finitePresentationChanged) {
       queuePresentationWrite(atMs, atMs, sessionCacheInvalidated || finitePresentationChanged);
     }
-    if ((dataChanged || sessionCacheInvalidated) && !closed && !closing) {
+    if ((dataChanged || sessionCacheInvalidated || coverageChanged) && !closed && !closing) {
       try {
         options.onGeneration?.(generation);
       } catch {

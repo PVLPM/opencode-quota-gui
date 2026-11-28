@@ -413,6 +413,12 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       }
       // Derivation only: the worker already produced this generation.
       await tickAnalytics(false, true);
+      // Activity coverage can advance without touching any indexed row, so the
+      // notification is also the only signal that an `activityUnavailable`
+      // Usage read may now be certifiable. `tickAnalytics` keeps quiet while
+      // Quota is the only active surface, so the loaded Usage pages are
+      // re-derived here instead of waiting for their next poll.
+      if (!analyticsViewActive()) await tickUsage();
     };
     analyticsNotifyChain = (analyticsNotifyChain ?? Promise.resolve())
       .then(run, run)
@@ -881,6 +887,24 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       staleUsageEntries();
       emit({ topic: "quota.changed", at: now() });
     }
+  }
+
+  /**
+   * Re-derives the loaded Usage pages only. Usage history is filled by the
+   * provider poll, so a Usage page is the one interest a generation
+   * notification can re-derive while Quota is the only active surface. It never
+   * refreshes analytics and never starts the worker.
+   */
+  async function tickUsage(): Promise<void> {
+    const epoch = viewerEpoch;
+    const usageComputes = Array.from(computes).filter(([key]) => kindOf(key) === "usage");
+    if (usageComputes.length === 0) return;
+    const changed = new Set<DashboardEventTopic>();
+    for (const [key, compute] of usageComputes) {
+      if (!(await pollOne(key, compute, epoch, changed))) break;
+    }
+    if (closed || viewerEpoch !== epoch) return;
+    if (changed.has("quota.changed")) emit({ topic: "quota.changed", at: now() });
   }
 
   async function tickAnalytics(refresh = true, retryIfBusy = false): Promise<void> {
