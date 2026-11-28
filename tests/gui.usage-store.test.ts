@@ -734,6 +734,132 @@ describe("usage store: duplicate, interruption and identity policy", () => {
   });
 });
 
+describe("usage store: imported Codex account isolation", () => {
+  const FIVE_HOUR = "window:five_hour";
+  const SPAN = { startMs: 0, endMs: BASE + 24 * 60 * MINUTE };
+
+  function importedRuns(db: UsageStore) {
+    return db.query(SPAN).runs.filter((run) => run.seriesId.startsWith("codex-import:"));
+  }
+
+  function importedSeries(db: UsageStore) {
+    return db.query(SPAN).series.filter((series) => series.source === "codex-import");
+  }
+
+  it("scopes identity-less readings to the session they came from", async () => {
+    const db = await store();
+    db.recordCodexRateLimitObservations([
+      {
+        atMs: BASE,
+        window: "primary",
+        windowMinutes: 300,
+        usedPercent: 20,
+        threadKey: "thread-1",
+      },
+      {
+        atMs: BASE + MINUTE,
+        window: "primary",
+        windowMinutes: 300,
+        usedPercent: 60,
+        threadKey: "thread-2",
+      },
+    ]);
+
+    // Two sessions with no account identity must never become one quota series:
+    // their readings are unrelated measurements, not one account's trajectory.
+    expect(
+      importedSeries(db)
+        .map((series) => series.cardId)
+        .sort(),
+    ).toEqual(["codex-import:unknown:thread-1", "codex-import:unknown:thread-2"]);
+    expect(importedRuns(db).map((run) => run.remainingPercent)).toEqual([80, 40]);
+    const first = importedRuns(db).find((run) =>
+      run.seriesId.startsWith("codex-import:unknown:thread-1"),
+    );
+    expect(first?.seriesId).toBe(`codex-import:unknown:thread-1#${FIVE_HOUR}`);
+  });
+
+  it("keeps an account switch inside one import in separate series", async () => {
+    const db = await store();
+    db.recordCodexRateLimitObservations([
+      { atMs: BASE, window: "primary", windowMinutes: 300, usedPercent: 10, accountHint: "acct-a" },
+      {
+        atMs: BASE + MINUTE,
+        window: "primary",
+        windowMinutes: 300,
+        usedPercent: 30,
+        threadKey: "thread-x",
+      },
+      {
+        atMs: BASE + 2 * MINUTE,
+        window: "primary",
+        windowMinutes: 300,
+        usedPercent: 80,
+        accountHint: "acct-b",
+      },
+    ]);
+
+    expect(
+      importedSeries(db)
+        .map((series) => series.cardId)
+        .sort(),
+    ).toEqual(["codex-import:acct-a", "codex-import:acct-b", "codex-import:unknown:thread-x"]);
+    // One reading each: the derivation has no pair of unrelated readings that
+    // could become a measured consumption interval.
+    for (const series of importedSeries(db)) {
+      const runs = importedRuns(db).filter((run) => run.seriesId === series.rowId);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]?.sampleCount).toBe(1);
+    }
+  });
+
+  it("keeps the account-hinted rowId stable for existing history", async () => {
+    const db = await store();
+    db.recordCodexRateLimitObservations([
+      {
+        atMs: BASE,
+        window: "primary",
+        windowMinutes: 300,
+        usedPercent: 20,
+        accountHint: "acct-a",
+        threadKey: "thread-1",
+        planType: "pro",
+      },
+    ]);
+    // Golden id: an account-hinted reading keeps `codex-import:<account>`.
+    expect(importedSeries(db).map((series) => series.rowId)).toEqual([
+      `codex-import:acct-a#${FIVE_HOUR}`,
+    ]);
+  });
+
+  it("re-imports an identity-less batch idempotently", async () => {
+    const db = await store();
+    const batch = [
+      {
+        atMs: BASE,
+        window: "primary" as const,
+        windowMinutes: 300,
+        usedPercent: 20,
+        threadKey: "thread-1",
+      },
+      {
+        atMs: BASE + MINUTE,
+        window: "primary" as const,
+        windowMinutes: 300,
+        usedPercent: 25,
+        threadKey: "thread-1",
+      },
+    ];
+    db.recordCodexRateLimitObservations(batch);
+    db.recordCodexRateLimitObservations(batch);
+
+    const runs = importedRuns(db);
+    expect(runs.map((run) => run.remainingPercent)).toEqual([80, 75]);
+    expect(runs.map((run) => run.sampleCount)).toEqual([1, 1]);
+    expect(importedSeries(db)).toHaveLength(1);
+  });
+});
+
 describe("usage recorder: live capture, exclusions and measurement identity", () => {
   it("records only live cycles and prefers provider observation time", async () => {
     const db = await store();

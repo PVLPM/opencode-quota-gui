@@ -303,6 +303,11 @@ export interface UsageImportedCodexRateLimit {
   limitId?: string;
   /** Hashed account hint; absent means "unknown". */
   accountHint?: string;
+  /**
+   * Hashed rollout session (thread) the reading came from. Only used to scope
+   * an unknown-account series; never treated as an account identity.
+   */
+  threadKey?: string;
 }
 
 export interface UsageReadStore {
@@ -442,11 +447,30 @@ function quantityParts(
  * Imported Codex quota series get their own provider identity. Sharing
  * `openai` made them look like rival OpenCode accounts and let OpenCode
  * activity attribute to them; a distinct id keeps both concerns isolated.
- * The card id stays `codex-import:<account>` so stored rows remain stable.
  */
 const CODEX_IMPORT_PROVIDER = "codex-import";
 const CODEX_IMPORT_PROVIDER_LABEL = "OpenAI Codex (imported)";
 let codexImportSequence = 0;
+/**
+ * Card id of one imported reading. A hashed account hint is a stable account
+ * identity, so those readings keep `codex-import:<account>` and still form one
+ * quota series across sessions.
+ *
+ * Without a hint the account is unknown: readings may belong to different
+ * subscriptions (an account switch between sessions), so they must never share
+ * one series where the interval derivation would measure fabricated consumption
+ * between them. The smallest unit provable from the imported data is the rollout
+ * session the reading came from, so the series is scoped to its hashed thread
+ * key. The key is stored in the reading and is stable across re-imports, which
+ * keeps the write idempotent; `codex-import:unknown` remains the fallback when
+ * no session identity is available at all.
+ */
+function codexImportCardId(observation: UsageImportedCodexRateLimit): string {
+  if (observation.accountHint !== undefined) return `codex-import:${observation.accountHint}`;
+  return observation.threadKey === undefined
+    ? "codex-import:unknown"
+    : `codex-import:unknown:${observation.threadKey}`;
+}
 /** The one provider id each imported harness prices under. */
 export const USAGE_IMPORT_PROVIDER_IDS: Readonly<Record<UsageImportHarness, string>> = {
   "claude-code": "anthropic",
@@ -1383,7 +1407,7 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     for (const observation of observations) {
       if (!Number.isFinite(observation.atMs) || !Number.isFinite(observation.usedPercent)) continue;
       const atMs = Math.round(observation.atMs);
-      const cardId = `codex-import:${observation.accountHint ?? "unknown"}`;
+      const cardId = codexImportCardId(observation);
       const identity = codexWindowIdentity(observation);
       const planKey =
         observation.planType !== undefined && observation.planType.trim().length > 0

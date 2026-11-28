@@ -205,9 +205,16 @@ D10.2 integration (part 2):
   so Codex has no exclusion and remains a separate source, never merged into
   OpenCode attribution.
 - Imported Codex rate limits become `codex-import` series whose `cardId` is
-  `codex-import:<accountHash|unknown>` with row keys `window:five_hour` /
+  `codex-import:<accountHash>` with row keys `window:five_hour` /
   `window:week` for exact 300 / 10080 minute windows, otherwise
   `named:<limitId>|<window>|<minutes>`. They are not merged into OpenAI cards.
+- A rollout without `creator_account_id` carries no account identity, so those
+  readings are scoped to the session (rollout thread) they came from:
+  `codex-import:unknown:<threadHash>`. An unknown account is never merged with
+  another session's readings, so the interval derivation cannot measure
+  consumption between two possibly different subscriptions. The thread hash is
+  persisted in the reading, so re-imports stay idempotent; account-hinted rows
+  keep the unchanged `codex-import:<accountHash>` id.
 - Imported activity is grouped by provider/model/effort and priced through
   `priceTokenBuckets`; provider ids are `anthropic` for Claude Code and
   `openai` for Codex. It is returned only as `UsageSnapshot.importedActivity`

@@ -36,6 +36,7 @@ const CLAUDE_UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const CLAUDE_PROMPT = "SECRET-CLAUDE-PROMPT";
 const CLAUDE_PATH = "C:\\SECRET-CLAUDE-WORKSPACE";
 const CODEX_THREAD = "thread-SECRET-0001";
+const CODEX_THREAD_B = "thread-SECRET-0002";
 const CODEX_ACCOUNT = "acct-SECRET-0001";
 const CODEX_PROMPT = "SECRET-CODEX-PROMPT";
 const CODEX_PATH = "C:\\SECRET-CODEX-WORKSPACE";
@@ -538,6 +539,60 @@ describe("usage import", () => {
     expect(weekRuns.map((run) => run.reset_precision)).toEqual(["estimated", "estimated"]);
     expect(fiveHourRuns[0]?.resetAtMs).toBe(Number(RESET_PRIMARY) * 1000);
     expect(weekRuns[0]?.resetAtMs).toBe(Number(RESET_SECONDARY) * 1000);
+  });
+
+  it("scopes identity-less Codex readings to the session they came from", async () => {
+    await writeCodex();
+    // A second rollout of an unattributed account: Codex records no
+    // creator_account_id, so nothing proves it is the same subscription.
+    await writeFile(
+      join(codexRoot, "sessions", "rollout-2026-11-01T11-00-00.jsonl"),
+      `${JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-11-01T11:00:30.000Z",
+        payload: { id: CODEX_THREAD_B },
+      })}
+` +
+        codexLine(
+          { input: 10, cached: 0, output: 5, reasoning: 0 },
+          90,
+          10,
+          "2026-11-01T11:01:10.000Z",
+        ) +
+        codexLine(
+          { input: 20, cached: 0, output: 5, reasoning: 0 },
+          95,
+          15,
+          "2026-11-01T11:02:10.000Z",
+        ),
+    );
+    const db = await store();
+    const recorder = makeRecorder({
+      store: db,
+      settings: { claudeCode: false, codex: true },
+      now: () => BASE,
+    });
+    recorder.observe(liveSnapshot());
+    await recorder.flush();
+
+    const slice = db.query({ startMs: 0, endMs: BASE + 24 * 60 * MINUTE });
+    const imported = slice.series.filter((series) => series.source === "codex-import");
+    const account = `codex-import:${hashUsageImport("codex-account", CODEX_ACCOUNT)}`;
+    const session = `codex-import:unknown:${hashUsageImport("codex-thread", CODEX_THREAD_B)}`;
+    expect([...new Set(imported.map((series) => series.cardId))].sort()).toEqual(
+      [account, session].sort(),
+    );
+
+    const runsFor = (cardId: string, rowKey: string) =>
+      slice.runs.filter((run) => run.seriesId === `${cardId}#${rowKey}`);
+    // Each subscription keeps its own trajectory: the unattributed session is
+    // never inserted between the attributed account's readings.
+    expect(runsFor(account, "window:five_hour").map((run) => run.remainingPercent)).toEqual([
+      80, 70,
+    ]);
+    expect(runsFor(session, "window:five_hour").map((run) => run.remainingPercent)).toEqual([
+      10, 5,
+    ]);
   });
 
   it("re-reads the enabled flag before each harness scan so a disable stops Codex", async () => {

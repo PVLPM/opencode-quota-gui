@@ -231,6 +231,9 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
       for (const observation of thread.rateLimitObservations) {
         observations.push({
           ...observation,
+          // The imported session is the only provable scope when a rollout
+          // carries no account identity; it keeps those readings from merging.
+          threadKey: thread.threadKey,
           ...(thread.accountHint !== undefined ? { accountHint: thread.accountHint } : {}),
         });
       }
