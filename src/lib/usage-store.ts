@@ -9,6 +9,12 @@
  * the latest run inside it, so concurrent writers from separate processes
  * idempotently collapse the same measurement. A unique index cannot model
  * aggregated runs: a split leaves two rows sharing an endpoint.
+ *
+ * Imported history has a second cross-process contract. Several hosts open the
+ * same database, so each has its own importer single-flight; an in-process gate
+ * cannot see another host's deletion. A per-harness generation counter in
+ * `usage_meta` fences every import write instead: a deletion increments it
+ * inside its transaction, and a scan that read an older value commits nothing.
  */
 import type {
   AccountingMetric,
@@ -285,6 +291,13 @@ export interface UsageHistorySlice {
 
 export type UsageImportStatusKind = "ok" | "unavailable" | "error";
 
+/**
+ * Outcome of an import write that is fenced on a harness's generation.
+ * `superseded` means a deletion committed after the scan read the counter, so
+ * nothing was written and the scan must be abandoned for this opportunity.
+ */
+export type UsageImportWriteOutcome = "recorded" | "superseded";
+
 /** Persisted per-harness importer state; opaque cursors stay JSON text. */
 export interface UsageImportState {
   cursor?: string;
@@ -326,6 +339,26 @@ export interface UsageImportedCodexRateLimit {
   threadKey?: string;
 }
 
+/**
+ * Everything one harness scan chunk commits, in one transaction: the rows it
+ * parsed and the cursor that says it already read them. They must land
+ * together, because a deletion between the two would leave a resumed scan
+ * pointing past history that no longer exists.
+ */
+export interface UsageImportChunk {
+  harness: UsageImportHarness;
+  invocations?: readonly UsageImportedInvocation[];
+  /** Codex only: the readings become `codex-import` series in the same commit. */
+  codexRateLimits?: readonly UsageImportedCodexRateLimit[];
+  /** New cursor and outcome; omitted when the scan only reports unavailability. */
+  state?: UsageImportState;
+  /**
+   * Generation read when the scan started. An importer always passes it; a
+   * caller outside the importer omits it and is never fenced.
+   */
+  expectedGeneration?: number;
+}
+
 export interface UsageReadStore {
   query(span: { startMs: number; endMs: number }): UsageHistorySlice;
   /**
@@ -342,13 +375,34 @@ export interface UsageStore extends UsageReadStore {
   readonly path: string;
   /** One full collector cycle; synchronous and single-transaction. */
   recordCycle(observation: UsageCycleObservation): void;
-  /** Upsert imported invocations; counters take the per-counter maximum. */
+  /**
+   * One harness's import generation, the counter `deleteImportedHistory`
+   * increments. An importer reads it when a harness scan starts and passes it
+   * back to every write that scan commits. Absent means 0.
+   */
+  getImportGeneration(harness: UsageImportHarness): number;
+  /**
+   * Upsert imported invocations; counters take the per-counter maximum. Writes
+   * nothing and reports `superseded` when `expectedGeneration` has moved.
+   */
   recordImportedInvocations(
     harness: UsageImportHarness,
     invocations: readonly UsageImportedInvocation[],
-  ): void;
-  /** Write Codex rate-limit readings as `codex-import` series runs. */
-  recordCodexRateLimitObservations(observations: readonly UsageImportedCodexRateLimit[]): void;
+    expectedGeneration?: number,
+  ): UsageImportWriteOutcome;
+  /**
+   * Write Codex rate-limit readings as `codex-import` series runs. Writes
+   * nothing and reports `superseded` when `expectedGeneration` has moved.
+   */
+  recordCodexRateLimitObservations(
+    observations: readonly UsageImportedCodexRateLimit[],
+    expectedGeneration?: number,
+  ): UsageImportWriteOutcome;
+  /**
+   * One harness scan chunk in one fenced transaction: its rows and its cursor
+   * commit together or not at all.
+   */
+  commitImportChunk(chunk: UsageImportChunk): UsageImportWriteOutcome;
   /** Hash-only cross-harness exclusion set; Claude Code session/message keys. */
   addImportExclusionKeys(keys: readonly string[]): void;
   /**
@@ -357,11 +411,18 @@ export interface UsageStore extends UsageReadStore {
    * their runs, interruptions and conflicts, and its persisted import cursor.
    * Polled (live) history and the other harness are untouched, and the
    * hash-only exclusion set is kept because it describes OpenCode's own
-   * Claude Agent identities, not the imported rows.
+   * Claude Agent identities, not the imported rows. The harness's import
+   * generation is incremented in the same transaction, which supersedes every
+   * scan another host already started.
    */
   deleteImportedHistory(harness: UsageImportHarness): DeleteImportedHistoryResult;
   getImportState(harness: UsageImportHarness): UsageImportState | undefined;
-  setImportState(harness: UsageImportHarness, state: UsageImportState): void;
+  /** Writes nothing and reports `superseded` when `expectedGeneration` has moved. */
+  setImportState(
+    harness: UsageImportHarness,
+    state: UsageImportState,
+    expectedGeneration?: number,
+  ): UsageImportWriteOutcome;
   /** Priced imported activity, aligned with the given query intervals. */
   queryImportedActivity(
     query: UsageActivityQuery,
@@ -932,6 +993,15 @@ function createReader(conn: SqliteConn): UsageReadStore {
   };
 }
 
+/**
+ * `usage_meta` key of one harness's import generation. Deliberately not a
+ * schema migration: `usage_meta` already exists, an absent key reads as 0, and
+ * the counter has no rows of its own to migrate.
+ */
+function importGenerationKey(harness: UsageImportHarness): string {
+  return `import_generation:${harness}`;
+}
+
 function createStore(conn: WritableSqliteConn, path: string): UsageStore {
   const reader = createReader(conn);
   // A shared in-flight snapshot can reach the observer twice. Cycle ids are
@@ -1327,21 +1397,26 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     }
   }
 
-  function recordCycle(observation: UsageCycleObservation): void {
-    if (recentCycles.has(observation.collectorRunId)) return;
+  /** Body of one collector cycle; the caller owns the transaction. */
+  function writeCycleBody(observation: UsageCycleObservation): void {
     const observedByCard = new Map(
       observation.observedCards.map((card) => [card.cardId, card] as const),
     );
     const sampledSeries = new Set(observation.samples.map((sample) => sample.series.rowId));
     const interruptedCards = new Set(observation.interruptions.map((item) => item.cardId));
     const watermarks = new Map<string, number>();
+    for (const sample of observation.samples) writeSample(sample, observation, watermarks);
+    for (const interruption of observation.interruptions) {
+      writeInterruption(interruption, observation);
+    }
+    recordMissingRows(observation, observedByCard, sampledSeries, interruptedCards);
+  }
+
+  function recordCycle(observation: UsageCycleObservation): void {
+    if (recentCycles.has(observation.collectorRunId)) return;
     conn.exec("BEGIN IMMEDIATE");
     try {
-      for (const sample of observation.samples) writeSample(sample, observation, watermarks);
-      for (const interruption of observation.interruptions) {
-        writeInterruption(interruption, observation);
-      }
-      recordMissingRows(observation, observedByCard, sampledSeries, interruptedCards);
+      writeCycleBody(observation);
       conn.exec("COMMIT");
     } catch (error) {
       try {
@@ -1354,67 +1429,36 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     rememberCycle(observation.collectorRunId);
   }
 
-  function recordImportedInvocations(
+  function importGeneration(harness: UsageImportHarness): number {
+    const row = conn.get<{ value: string }>("SELECT value FROM usage_meta WHERE key = ?", [
+      importGenerationKey(harness),
+    ]);
+    if (row === null) return 0;
+    const parsed = Number(row.value);
+    return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+  }
+
+  /**
+   * One fenced import write: a `BEGIN IMMEDIATE` transaction that re-reads
+   * `harness`'s generation before writing anything. Several hosts share this
+   * database and each has its own in-process gate, so only a check inside the
+   * write transaction can see another host's deletion. `write` returns the
+   * synthetic collector cycle id it committed, if any: the in-memory replay
+   * window remembers it only once the commit has landed.
+   */
+  function fencedImportWrite(
     harness: UsageImportHarness,
-    invocations: readonly UsageImportedInvocation[],
-  ): void {
-    if (invocations.length === 0) return;
+    expectedGeneration: number | undefined,
+    write: () => string | undefined,
+  ): UsageImportWriteOutcome {
+    let committedCycleId: string | undefined;
     conn.exec("BEGIN IMMEDIATE");
     try {
-      for (const invocation of invocations) {
-        if (!Number.isFinite(invocation.atMs)) continue;
-        const tokens = invocation.tokens;
-        const atMs = Math.round(invocation.atMs);
-        // Store-boundary sanitization: a caller outside the parser still cannot
-        // persist a transcript-controlled model id or effort string.
-        const model = sanitizeUsageImportModelId(invocation.model) ?? "unknown";
-        const effort = sanitizeUsageImportEffort(invocation.effort);
-        conn.run(
-          `INSERT INTO usage_import_invocations (
-             harness, dedupe_key, at_ms, model, effort,
-             input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-             session_key, thread_key, account_hint
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(harness, dedupe_key) DO UPDATE SET
-             at_ms = MIN(usage_import_invocations.at_ms, excluded.at_ms),
-             model = CASE
-               WHEN usage_import_invocations.model = 'unknown' AND excluded.model <> 'unknown'
-                 THEN excluded.model
-               ELSE usage_import_invocations.model
-             END,
-             effort = COALESCE(usage_import_invocations.effort, excluded.effort),
-             input_tokens = MAX(usage_import_invocations.input_tokens, excluded.input_tokens),
-             cache_read_tokens = MAX(usage_import_invocations.cache_read_tokens, excluded.cache_read_tokens),
-             cache_write_tokens = MAX(usage_import_invocations.cache_write_tokens, excluded.cache_write_tokens),
-             output_tokens = MAX(usage_import_invocations.output_tokens, excluded.output_tokens),
-             reasoning_tokens = MAX(usage_import_invocations.reasoning_tokens, excluded.reasoning_tokens),
-             session_key = COALESCE(usage_import_invocations.session_key, excluded.session_key),
-             thread_key = COALESCE(usage_import_invocations.thread_key, excluded.thread_key),
-             account_hint = COALESCE(usage_import_invocations.account_hint, excluded.account_hint)`,
-          [
-            harness,
-            invocation.dedupeKey,
-            atMs,
-            model,
-            effort ?? null,
-            counter(tokens.input),
-            counter(tokens.cacheRead),
-            counter(tokens.cacheWrite),
-            counter(tokens.output),
-            counter(tokens.reasoning),
-            invocation.nativeSessionKey ?? null,
-            invocation.threadKey ?? null,
-            invocation.accountHint ?? null,
-          ],
-        );
-        for (const messageKey of invocation.nativeMessageKeys ?? []) {
-          conn.run(
-            `INSERT OR IGNORE INTO usage_import_invocation_keys (harness, dedupe_key, message_key)
-             VALUES (?, ?, ?)`,
-            [harness, invocation.dedupeKey, messageKey],
-          );
-        }
+      if (expectedGeneration !== undefined && importGeneration(harness) !== expectedGeneration) {
+        conn.exec("COMMIT");
+        return "superseded";
       }
+      committedCycleId = write();
       conn.exec("COMMIT");
     } catch (error) {
       try {
@@ -1424,11 +1468,87 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
       }
       throw error;
     }
+    if (committedCycleId !== undefined) rememberCycle(committedCycleId);
+    return "recorded";
   }
 
-  function recordCodexRateLimitObservations(
-    observations: readonly UsageImportedCodexRateLimit[],
+  /** Upsert imported invocations; the caller owns the transaction. */
+  function writeInvocations(
+    harness: UsageImportHarness,
+    invocations: readonly UsageImportedInvocation[],
   ): void {
+    for (const invocation of invocations) {
+      if (!Number.isFinite(invocation.atMs)) continue;
+      const tokens = invocation.tokens;
+      const atMs = Math.round(invocation.atMs);
+      // Store-boundary sanitization: a caller outside the parser still cannot
+      // persist a transcript-controlled model id or effort string.
+      const model = sanitizeUsageImportModelId(invocation.model) ?? "unknown";
+      const effort = sanitizeUsageImportEffort(invocation.effort);
+      conn.run(
+        `INSERT INTO usage_import_invocations (
+           harness, dedupe_key, at_ms, model, effort,
+           input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
+           session_key, thread_key, account_hint
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(harness, dedupe_key) DO UPDATE SET
+           at_ms = MIN(usage_import_invocations.at_ms, excluded.at_ms),
+           model = CASE
+             WHEN usage_import_invocations.model = 'unknown' AND excluded.model <> 'unknown'
+               THEN excluded.model
+             ELSE usage_import_invocations.model
+           END,
+           effort = COALESCE(usage_import_invocations.effort, excluded.effort),
+           input_tokens = MAX(usage_import_invocations.input_tokens, excluded.input_tokens),
+           cache_read_tokens = MAX(usage_import_invocations.cache_read_tokens, excluded.cache_read_tokens),
+           cache_write_tokens = MAX(usage_import_invocations.cache_write_tokens, excluded.cache_write_tokens),
+           output_tokens = MAX(usage_import_invocations.output_tokens, excluded.output_tokens),
+           reasoning_tokens = MAX(usage_import_invocations.reasoning_tokens, excluded.reasoning_tokens),
+           session_key = COALESCE(usage_import_invocations.session_key, excluded.session_key),
+           thread_key = COALESCE(usage_import_invocations.thread_key, excluded.thread_key),
+           account_hint = COALESCE(usage_import_invocations.account_hint, excluded.account_hint)`,
+        [
+          harness,
+          invocation.dedupeKey,
+          atMs,
+          model,
+          effort ?? null,
+          counter(tokens.input),
+          counter(tokens.cacheRead),
+          counter(tokens.cacheWrite),
+          counter(tokens.output),
+          counter(tokens.reasoning),
+          invocation.nativeSessionKey ?? null,
+          invocation.threadKey ?? null,
+          invocation.accountHint ?? null,
+        ],
+      );
+      for (const messageKey of invocation.nativeMessageKeys ?? []) {
+        conn.run(
+          `INSERT OR IGNORE INTO usage_import_invocation_keys (harness, dedupe_key, message_key)
+           VALUES (?, ?, ?)`,
+          [harness, invocation.dedupeKey, messageKey],
+        );
+      }
+    }
+  }
+
+  function recordImportedInvocations(
+    harness: UsageImportHarness,
+    invocations: readonly UsageImportedInvocation[],
+    expectedGeneration?: number,
+  ): UsageImportWriteOutcome {
+    if (invocations.length === 0) return "recorded";
+    return fencedImportWrite(harness, expectedGeneration, () => {
+      writeInvocations(harness, invocations);
+      return undefined;
+    });
+  }
+
+  /** The synthetic cycle one Codex import batch commits, when it has readings. */
+  function codexImportCycle(
+    observations: readonly UsageImportedCodexRateLimit[],
+  ): UsageCycleObservation | undefined {
     const samples: UsageCycleSample[] = [];
     for (const observation of observations) {
       if (!Number.isFinite(observation.atMs) || !Number.isFinite(observation.usedPercent)) continue;
@@ -1464,12 +1584,12 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         measuredAtMs: atMs,
       });
     }
-    if (samples.length === 0) return;
+    if (samples.length === 0) return undefined;
     samples.sort((left, right) => left.measuredAtMs - right.measuredAtMs);
     const lastSample = samples.at(-1);
-    if (lastSample === undefined) return;
+    if (lastSample === undefined) return undefined;
     codexImportSequence += 1;
-    recordCycle({
+    return {
       // Each import batch is one synthetic cycle. Re-reading the same points is
       // deduplicated by (series, time, value), never by this batch id.
       collectorRunId: `codex-import:${lastSample.measuredAtMs}:${codexImportSequence}`,
@@ -1480,6 +1600,33 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
       samples,
       interruptions: [],
       nowMs: lastSample.measuredAtMs,
+    };
+  }
+
+  function recordCodexRateLimitObservations(
+    observations: readonly UsageImportedCodexRateLimit[],
+    expectedGeneration?: number,
+  ): UsageImportWriteOutcome {
+    const cycle = codexImportCycle(observations);
+    if (cycle === undefined) return "recorded";
+    return fencedImportWrite("codex", expectedGeneration, () => {
+      writeCycleBody(cycle);
+      return cycle.collectorRunId;
+    });
+  }
+
+  function commitImportChunk(chunk: UsageImportChunk): UsageImportWriteOutcome {
+    // Rate-limit readings are Codex import data: they are never written under
+    // another harness's fence.
+    const cycle =
+      chunk.harness === "codex" && chunk.codexRateLimits !== undefined
+        ? codexImportCycle(chunk.codexRateLimits)
+        : undefined;
+    return fencedImportWrite(chunk.harness, chunk.expectedGeneration, () => {
+      if (chunk.invocations !== undefined) writeInvocations(chunk.harness, chunk.invocations);
+      if (cycle !== undefined) writeCycleBody(cycle);
+      if (chunk.state !== undefined) writeImportStateRow(chunk.harness, chunk.state);
+      return cycle?.collectorRunId;
     });
   }
 
@@ -1558,6 +1705,14 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
       // the importer only resumes a persisted cursor, and re-reading is
       // idempotent through the dedupe keys.
       conn.run("DELETE FROM usage_meta WHERE key = ?", [`import_state:${harness}`]);
+      // The fence: incrementing the generation in this transaction supersedes
+      // every scan another host started, so none of them can write this
+      // harness's rows or restore its cursor after the commit.
+      conn.run(
+        `INSERT INTO usage_meta (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        [importGenerationKey(harness), String(importGeneration(harness) + 1)],
+      );
       conn.exec("COMMIT");
       return { invocations, rateLimitSeries };
     } catch (error) {
@@ -1595,7 +1750,8 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     return state;
   }
 
-  function setImportState(harness: UsageImportHarness, state: UsageImportState): void {
+  /** Persist one harness's import state; the caller owns the transaction. */
+  function writeImportStateRow(harness: UsageImportHarness, state: UsageImportState): void {
     const value: UsageImportState = {};
     if (state.cursor !== undefined) value.cursor = state.cursor;
     if (state.lastImportedAtMs !== undefined && Number.isFinite(state.lastImportedAtMs)) {
@@ -1607,6 +1763,17 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
       "INSERT INTO usage_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
       [`import_state:${harness}`, JSON.stringify(value)],
     );
+  }
+
+  function setImportState(
+    harness: UsageImportHarness,
+    state: UsageImportState,
+    expectedGeneration?: number,
+  ): UsageImportWriteOutcome {
+    return fencedImportWrite(harness, expectedGeneration, () => {
+      writeImportStateRow(harness, state);
+      return undefined;
+    });
   }
 
   interface ImportedActivityAccumulator {
@@ -1822,8 +1989,10 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     recordCycle,
     query: reader.query,
     queryLatestEpochs: reader.queryLatestEpochs,
+    getImportGeneration: importGeneration,
     recordImportedInvocations,
     recordCodexRateLimitObservations,
+    commitImportChunk,
     addImportExclusionKeys,
     deleteImportedHistory,
     getImportState,

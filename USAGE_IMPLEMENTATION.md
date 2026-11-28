@@ -316,6 +316,16 @@ D10.2 integration (part 2):
   on its next opportunity.
 - Responses and logs carry counts only (deleted invocations, deleted imported
   rate-limit series); no path, hash, identifier or row content is returned.
+- The single-flight above is per process, and several OpenCode hosts share one
+  `usage-history.sqlite`, so the store fences deletions across processes too. The
+  importer reads the harness's generation counter (`usage_meta` key
+  `import_generation:<harness>`, absent = 0) when a scan starts and passes it to
+  the one transaction that commits that chunk's rows and cursor; a deletion
+  increments the counter inside its own transaction. A scan that awaited
+  transcript I/O across a deletion therefore commits nothing — it neither
+  restores the deleted rows nor re-creates the cursor — and abandons that
+  harness for the opportunity, so the next one re-reads from offset 0. The
+  counter reuses `usage_meta`, so no schema migration is involved.
 
 ### D11 No new traffic
 Capture hooks into the existing `createDelegatingSource.quota` observation

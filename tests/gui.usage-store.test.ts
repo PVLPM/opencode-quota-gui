@@ -1013,6 +1013,159 @@ describe("usage store: deleting imported history per harness", () => {
   });
 });
 
+describe("usage store: import generation fence across hosts", () => {
+  const SPAN = { startMs: 0, endMs: BASE + 24 * 60 * MINUTE };
+
+  function importedRuns(db: UsageStore) {
+    return db.query(SPAN).runs.filter((run) => run.seriesId.startsWith("codex-import:"));
+  }
+
+  function importedSeries(db: UsageStore) {
+    return db.query(SPAN).series.filter((series) => series.source === "codex-import");
+  }
+
+  async function invocationCount(harness: "claude-code" | "codex"): Promise<number> {
+    const reader = await openOpenCodeSqliteReadOnly(path);
+    try {
+      return (
+        reader.get<{ total: number }>(
+          "SELECT COUNT(*) AS total FROM usage_import_invocations WHERE harness = ?",
+          [harness],
+        )?.total ?? 0
+      );
+    } finally {
+      reader.close();
+    }
+  }
+
+  function importedClaude(atMs: number, key: string) {
+    return {
+      atMs,
+      model: "claude-sonnet-4-5",
+      tokens: { input: 10, cacheRead: 0, cacheWrite: 0, output: 5, reasoning: 0 },
+      dedupeKey: `claude-${key}`,
+    };
+  }
+
+  function importedCodex(atMs: number, key: string) {
+    return {
+      atMs,
+      model: "gpt-5",
+      effort: "high",
+      tokens: { input: 20, cacheRead: 0, cacheWrite: 0, output: 7, reasoning: 1 },
+      dedupeKey: `codex-${key}`,
+    };
+  }
+
+  /**
+   * Two hosts share one database file: `hostA` commits the deletion while
+   * `hostB`, holding a generation it already read, commits a scan chunk.
+   */
+  it("supersedes a chunk a deletion overtook and writes neither rows nor cursor", async () => {
+    const hostA = await store();
+    const hostB = await store();
+    const scanGeneration = hostB.getImportGeneration("claude-code");
+    expect(scanGeneration).toBe(0);
+
+    expect(hostA.deleteImportedHistory("claude-code")).toEqual({
+      invocations: 0,
+      rateLimitSeries: 0,
+    });
+    expect(hostB.getImportGeneration("claude-code")).toBe(scanGeneration + 1);
+
+    expect(
+      hostB.commitImportChunk({
+        harness: "claude-code",
+        invocations: [importedClaude(BASE + 1_000, "fenced")],
+        state: { enabled: true, status: "ok", cursor: '{"offset":9}' },
+        expectedGeneration: scanGeneration,
+      }),
+    ).toBe("superseded");
+
+    expect(await invocationCount("claude-code")).toBe(0);
+    expect(hostB.getImportState("claude-code")).toBeUndefined();
+  });
+
+  it("fences every single-write import API on a stale generation", async () => {
+    const hostA = await store();
+    const hostB = await store();
+    const stale = hostB.getImportGeneration("codex");
+    hostA.deleteImportedHistory("codex");
+
+    expect(hostB.recordImportedInvocations("codex", [importedCodex(BASE, "stale")], stale)).toBe(
+      "superseded",
+    );
+    expect(
+      hostB.recordCodexRateLimitObservations(
+        [
+          {
+            atMs: BASE,
+            window: "primary",
+            windowMinutes: 300,
+            usedPercent: 20,
+            accountHint: "acct-a",
+          },
+        ],
+        stale,
+      ),
+    ).toBe("superseded");
+    expect(hostB.setImportState("codex", { enabled: true, cursor: '{"offset":1}' }, stale)).toBe(
+      "superseded",
+    );
+
+    expect(await invocationCount("codex")).toBe(0);
+    expect(importedSeries(hostB)).toEqual([]);
+    expect(hostB.getImportState("codex")).toBeUndefined();
+  });
+
+  it("commits a chunk's rows and cursor together when nothing superseded it", async () => {
+    const hostA = await store();
+    const hostB = await store();
+    const generation = hostB.getImportGeneration("codex");
+    expect(generation).toBe(0);
+
+    expect(
+      hostB.commitImportChunk({
+        harness: "codex",
+        invocations: [importedCodex(BASE + 1_000, "kept")],
+        codexRateLimits: [
+          {
+            atMs: BASE + 2_000,
+            window: "primary",
+            windowMinutes: 300,
+            usedPercent: 20,
+            accountHint: "acct-a",
+          },
+        ],
+        state: { enabled: true, status: "ok", cursor: '{"offset":4}' },
+        expectedGeneration: generation,
+      }),
+    ).toBe("recorded");
+
+    expect(await invocationCount("codex")).toBe(1);
+    expect(importedSeries(hostB).map((series) => series.cardId)).toEqual(["codex-import:acct-a"]);
+    expect(importedRuns(hostB)).toHaveLength(1);
+    expect(hostB.getImportState("codex")).toMatchObject({
+      enabled: true,
+      status: "ok",
+      cursor: '{"offset":4}',
+    });
+    // An unfenced write leaves the counter alone, so the other host stays valid.
+    expect(hostA.getImportGeneration("codex")).toBe(generation);
+  });
+
+  it("keeps the counter monotonic so repeated deletions keep fencing", async () => {
+    const db = await store();
+    expect(db.getImportGeneration("claude-code")).toBe(0);
+    db.deleteImportedHistory("claude-code");
+    db.deleteImportedHistory("claude-code");
+    expect(db.getImportGeneration("claude-code")).toBe(2);
+    // Even a deletion that removes nothing increments: a scan may be in flight.
+    expect(db.deleteImportedHistory("claude-code")).toEqual({ invocations: 0, rateLimitSeries: 0 });
+    expect(db.getImportGeneration("claude-code")).toBe(3);
+  });
+});
+
 describe("usage store: imported Codex account isolation", () => {
   const FIVE_HOUR = "window:five_hour";
   const SPAN = { startMs: 0, endMs: BASE + 24 * 60 * MINUTE };
