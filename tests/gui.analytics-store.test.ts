@@ -1,4 +1,12 @@
-import { existsSync, linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -259,7 +267,76 @@ describe("analytics SQLite store", () => {
     expect([...merged.removed]).toEqual(["b"]);
     delta.markReplaced();
     delta.markChanged("x");
-    expect(delta.take()).toEqual({ full: true, dirty: new Set(), removed: new Set() });
+    const replaced = delta.take();
+    expect(replaced.full).toBe(true);
+    expect([...replaced.dirty]).toEqual([]);
+  });
+
+  it("moves a re-added occurrence to the end once, not on later updates", () => {
+    // Map: [a, b] -> remove a, re-add a, add c, update a -> [b, a, c].
+    const delta = createAnalyticsPersistDelta();
+    delta.markRemoved("a");
+    delta.markChanged("a");
+    delta.markChanged("c");
+    delta.markChanged("a");
+    expect([...delta.take().dirty]).toEqual(["a", "c"]);
+
+    // The same marks split by a failed write: the retry keeps the order.
+    delta.markRemoved("a");
+    delta.markChanged("a");
+    const failed = delta.take();
+    delta.markChanged("c");
+    delta.markChanged("a");
+    delta.restore(failed);
+    expect([...delta.take().dirty]).toEqual(["a", "c"]);
+
+    // Removed in the failed batch and re-added after it: it now sits last.
+    delta.markRemoved("a");
+    const removed = delta.take();
+    delta.markChanged("c");
+    delta.markChanged("a");
+    delta.markChanged("c");
+    delta.restore(removed);
+    expect([...delta.take().dirty]).toEqual(["c", "a"]);
+  });
+
+  it("keeps Map order across a re-add, a later update and a failed write", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const builder = stateBuilder();
+    seed(builder);
+    const store = createAnalyticsStore({ snapshotPath });
+    await store.saveSnapshot(builder.state, NOW, builder.delta);
+
+    builder.remove("m1");
+    builder.set(rawRow("ses_a", "m1", NOW - 10_000), NOW + 1);
+    builder.set(rawRow("ses_a", "m9", NOW + 1), NOW + 1);
+    const broken = builder.state.occurrences.get("m9");
+    if (!broken) throw new Error("expected m9");
+    const goodIndex = broken.fingerprintIndex;
+    broken.fingerprintIndex = 10_000;
+    expect(await store.saveSnapshot(builder.state, NOW + 1, builder.delta)).toBe(false);
+    broken.fingerprintIndex = goodIndex;
+    builder.set(rawRow("ses_a", "m5", NOW + 2), NOW + 2);
+    builder.set(rawRow("ses_a", "m1", NOW - 10_000, { variant: "high" }), NOW + 3);
+    expect(await store.saveSnapshot(builder.state, NOW + 3, builder.delta)).toBe(true);
+    store.close();
+
+    const reopened = createAnalyticsStore({ snapshotPath });
+    const loaded = await reopened.loadSnapshot();
+    reopened.close();
+    expect([...(loaded as AnalyticsState).occurrences.keys()]).toEqual([
+      ...builder.state.occurrences.keys(),
+    ]);
+    expect([...builder.state.occurrences.keys()]).toEqual([
+      "m1_fork",
+      "m2",
+      "m3",
+      "m4",
+      "m1",
+      "m9",
+      "m5",
+    ]);
   });
 
   it("fences a stale writer into a whole-index rewrite (last writer wins, never a mix)", async () => {
@@ -336,6 +413,48 @@ describe("analytics SQLite store", () => {
       canonical(loaded as AnalyticsState),
     );
     again.close();
+  });
+
+  it("imports the legacy sidecar before removing it when the index migrates first", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const sidecar = `${snapshotPath}.presentation.json`;
+    const builder = stateBuilder();
+    seed(builder);
+    builder.state.presentation = {
+      home: { "7d": { projects: [], usage: { timeZone: "UTC" } } as unknown as HomeSnapshot },
+      project: [],
+    };
+    expect(await saveAnalyticsSnapshot(snapshotPath, builder.state, NOW - 60_000)).toBe(true);
+    expect(await saveAnalyticsPresentation(sidecar, builder.state, NOW)).toBe(true);
+
+    const store = createAnalyticsStore({ snapshotPath });
+    expect((await store.loadSnapshot())?.occurrences.size).toBe(5);
+    store.close();
+    expect(existsSync(snapshotPath)).toBe(false);
+    expect(existsSync(sidecar)).toBe(false);
+    const again = createAnalyticsStore({ snapshotPath });
+    const warm = await again.loadPresentation();
+    again.close();
+    expect(warm?.home["7d"]).toBeDefined();
+    expect(warm?.savedAtMs).toBe(NOW);
+  });
+
+  it("keeps both legacy files while a sidecar cannot be read", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const sidecar = `${snapshotPath}.presentation.json`;
+    const builder = stateBuilder();
+    seed(builder);
+    expect(await saveAnalyticsSnapshot(snapshotPath, builder.state, NOW - 60_000)).toBe(true);
+    // A read error (here: a directory) is not proof the sidecar is invalid.
+    mkdirSync(sidecar);
+
+    const store = createAnalyticsStore({ snapshotPath });
+    expect((await store.loadSnapshot())?.occurrences.size).toBe(5);
+    store.close();
+    expect(existsSync(snapshotPath)).toBe(true);
+    expect(existsSync(sidecar)).toBe(true);
   });
 
   it("keeps an unsupported legacy file until a SQLite index has committed", async () => {
@@ -420,6 +539,8 @@ describe("analytics SQLite store", () => {
     conn.exec("CREATE TABLE analytics_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     conn.run("INSERT INTO analytics_meta (key, value) VALUES ('schema_version', '99')");
     conn.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    // The journal mode is part of the file: opening it must not switch it to WAL.
+    conn.exec("PRAGMA journal_mode = DELETE");
     conn.close();
     const bytes = readFileSync(path);
 
@@ -431,6 +552,110 @@ describe("analytics SQLite store", () => {
     expect(await store.savePresentation(builder.state, NOW)).toBe(false);
     store.close();
     expect(readFileSync(path).equals(bytes)).toBe(true);
+  });
+
+  it("reopens before writing when the schema was replaced under an open handle", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const builder = stateBuilder();
+    seed(builder);
+    const store = createAnalyticsStore({ snapshotPath });
+    expect(await store.saveSnapshot(builder.state, NOW, builder.delta)).toBe(true);
+    const other = await openOpenCodeSqliteWritable(analyticsStorePathFor(snapshotPath));
+    other.run("UPDATE analytics_meta SET value = '0' WHERE key = 'schema_version'");
+    other.close();
+
+    builder.set(rawRow("ses_a", "m5", NOW + 1), NOW + 1);
+    // Refused on the stale handle; the retry reopens, rebuilds the schema and
+    // rewrites the whole index.
+    expect(await store.saveSnapshot(builder.state, NOW + 1, builder.delta)).toBe(false);
+    expect(await store.saveSnapshot(builder.state, NOW + 2, builder.delta)).toBe(true);
+    expect(store.lastWrite()).toEqual({ rows: 6, full: true });
+    store.close();
+  });
+
+  it("stops writing when another process upgrades the schema under an open handle", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const builder = stateBuilder();
+    seed(builder);
+    const store = createAnalyticsStore({ snapshotPath });
+    expect(await store.saveSnapshot(builder.state, NOW, builder.delta)).toBe(true);
+    expect(await store.savePresentation(builder.state, NOW)).toBe(true);
+
+    const other = await openOpenCodeSqliteWritable(analyticsStorePathFor(snapshotPath));
+    other.run("UPDATE analytics_meta SET value = '99' WHERE key = 'schema_version'");
+    other.run("UPDATE analytics_meta SET value = 'newer-epoch' WHERE key = 'store.epoch'");
+    const meta = () =>
+      other.all<{ key: string; value: string }>("SELECT key, value FROM analytics_meta");
+    const before = meta();
+
+    builder.set(rawRow("ses_a", "m5", NOW + 1), NOW + 1);
+    expect(await store.saveSnapshot(builder.state, NOW + 1, builder.delta)).toBe(false);
+    expect(await store.savePresentation(builder.state, NOW + 1)).toBe(false);
+    expect(await store.loadSnapshot()).toBeUndefined();
+    store.close();
+    expect(meta()).toEqual(before);
+    other.close();
+  });
+
+  it("removes a Project slot of one range without touching the other range", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const builder = stateBuilder();
+    const project = (marker: string) => ({ roots: [], usage: { marker } }) as never;
+    builder.state.presentation = {
+      home: {},
+      project: [
+        ["p1", "7d", project("seven")],
+        ["p1", "30d", project("thirty")],
+      ],
+    };
+    const store = createAnalyticsStore({ snapshotPath });
+    expect(await store.savePresentation(builder.state, NOW)).toBe(true);
+    builder.state.presentation = { home: {}, project: [["p1", "7d", project("seven")]] };
+    expect(await store.savePresentation(builder.state, NOW + 1)).toBe(true);
+    store.close();
+
+    const conn = await openOpenCodeSqliteWritable(analyticsStorePathFor(snapshotPath));
+    expect(conn.get<{ n: number }>("SELECT count(*) AS n FROM analytics_presentation")?.n).toBe(1);
+    // A key from an earlier candidate build, with a NUL separator.
+    conn.run(
+      "INSERT INTO analytics_presentation (slot, ord, hash, payload) VALUES (?, 5, 'h', ?)",
+      ["project:p1\u000030d", JSON.stringify(["p1", "30d", project("stale")])],
+    );
+    conn.close();
+
+    const reopened = createAnalyticsStore({ snapshotPath });
+    expect(await reopened.savePresentation(builder.state, NOW + 2)).toBe(true);
+    const warm = await reopened.loadPresentation();
+    reopened.close();
+    expect(warm?.project.map(([id, range]) => `${id}:${range}`)).toEqual(["p1:7d"]);
+  });
+
+  it("counts the presentation budget in UTF-8 bytes", async () => {
+    const root = tempRoot();
+    const snapshotPath = join(root, "analytics-v3.json");
+    const builder = stateBuilder();
+    // 600K CJK characters: 0.6M UTF-16 units, 1.8 MB of UTF-8 each.
+    const session = (id: string): [string, SessionSnapshot] => [
+      id,
+      { focusSessionId: id, stepSemantics: "界".repeat(600_000) } as unknown as SessionSnapshot,
+    ];
+    builder.state.presentation = {
+      home: {},
+      project: [],
+      session: [session("s1"), session("s2"), session("s3")],
+    };
+    const store = createAnalyticsStore({ snapshotPath });
+    expect(await store.savePresentation(builder.state, NOW)).toBe(true);
+    store.close();
+    const conn = await openOpenCodeSqliteWritable(analyticsStorePathFor(snapshotPath));
+    const slots = conn.all<{ slot: string }>(
+      "SELECT slot FROM analytics_presentation ORDER BY ord",
+    );
+    conn.close();
+    expect(slots.map((row) => row.slot)).toEqual(["session:s2", "session:s3"]);
   });
 
   it("stores the warm presentation per slot and keeps its certification fields", async () => {

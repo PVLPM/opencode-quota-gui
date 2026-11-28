@@ -74,6 +74,10 @@ const ANALYTICS_STORE_JOURNAL_LIMIT_BYTES = 8 * 1024 * 1024;
 const ANALYTICS_STORE_LOAD_SLICE_MS = 50;
 const ANALYTICS_STORE_LOAD_CLOCK_ROWS = 1_024;
 
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -86,10 +90,14 @@ function yieldToEventLoop(): Promise<void> {
 interface AnalyticsDeltaBatch {
   /** The whole index must be rewritten (source replacement or first write). */
   full: boolean;
-  /** Message ids upserted or removed, in first-change order. */
+  /** Message ids upserted or removed, ordered like their rows in the `Map`. */
   dirty: Set<string>;
-  /** Message ids removed at least once (a re-added id moves to the end). */
+  /** Message ids removed at least once (their rows are deleted and re-inserted). */
   removed: Set<string>;
+  /** Message ids re-added after a removal in this batch: they moved to the `Map` end. */
+  moved: Set<string>;
+  /** Message ids whose last mark in this batch was a removal. */
+  absent: Set<string>;
 }
 
 export interface AnalyticsPersistDelta {
@@ -103,55 +111,61 @@ export interface AnalyticsPersistDelta {
   restore(batch: AnalyticsDeltaBatch): void;
 }
 
+function emptyDeltaBatch(full: boolean): AnalyticsDeltaBatch {
+  return { full, dirty: new Set(), removed: new Set(), moved: new Set(), absent: new Set() };
+}
+
 export function createAnalyticsPersistDelta(): AnalyticsPersistDelta {
-  let full = false;
-  let dirty = new Set<string>();
-  let removed = new Set<string>();
+  let pending = emptyDeltaBatch(false);
   return {
     markChanged(messageId) {
-      if (full) return;
-      // A removed id that comes back is appended to the in-memory Map, so its
-      // row must move to the end as well: re-mark it after every newer id.
-      if (removed.has(messageId)) dirty.delete(messageId);
-      dirty.add(messageId);
+      if (pending.full) return;
+      // Only an absent id that comes back is appended to the in-memory Map;
+      // a later update of it leaves it where it is.
+      if (pending.absent.delete(messageId)) {
+        pending.dirty.delete(messageId);
+        pending.moved.add(messageId);
+      }
+      pending.dirty.add(messageId);
     },
     markRemoved(messageId) {
-      if (full) return;
-      dirty.add(messageId);
-      removed.add(messageId);
+      if (pending.full) return;
+      pending.dirty.add(messageId);
+      pending.removed.add(messageId);
+      pending.absent.add(messageId);
     },
     markReplaced() {
-      full = true;
-      dirty = new Set();
-      removed = new Set();
+      pending = emptyDeltaBatch(true);
     },
     reset() {
-      full = false;
-      dirty = new Set();
-      removed = new Set();
+      pending = emptyDeltaBatch(false);
     },
     take() {
-      const batch = { full, dirty, removed };
-      full = false;
-      dirty = new Set();
-      removed = new Set();
+      const batch = pending;
+      pending = emptyDeltaBatch(false);
       return batch;
     },
     restore(batch) {
-      if (batch.full || full) {
-        full = true;
-        dirty = new Set();
-        removed = new Set();
+      if (batch.full || pending.full) {
+        pending = emptyDeltaBatch(true);
         return;
       }
-      for (const id of batch.removed) removed.add(id);
-      const merged = new Set(batch.dirty);
-      for (const id of dirty) {
-        // Removed in either batch and marked again: it now sits last in the Map.
-        if (removed.has(id)) merged.delete(id);
-        merged.add(id);
+      const newer = pending;
+      const merged: AnalyticsDeltaBatch = {
+        full: false,
+        dirty: new Set(batch.dirty),
+        removed: new Set([...batch.removed, ...newer.removed]),
+        moved: new Set([...batch.moved, ...newer.moved]),
+        absent: new Set(batch.absent),
+      };
+      for (const id of newer.dirty) {
+        // Re-added since the failed batch (there or here): it now sits last.
+        if (newer.moved.has(id) || batch.absent.has(id)) merged.dirty.delete(id);
+        merged.dirty.add(id);
+        merged.absent.delete(id);
       }
-      dirty = merged;
+      for (const id of newer.absent) merged.absent.add(id);
+      pending = merged;
     },
   };
 }
@@ -242,6 +256,13 @@ const TABLES = [
 class StoreUnsupportedError extends Error {
   constructor() {
     super("analytics-store-unsupported");
+  }
+}
+
+/** Another process replaced the schema under an open handle; reopen before any write. */
+class StoreSchemaChangedError extends Error {
+  constructor() {
+    super("analytics-store-schema-changed");
   }
 }
 
@@ -414,6 +435,9 @@ function initializeSchema(conn: WritableSqliteConn): string {
     // here would make two installed versions destroy each other's cache.
     throw new StoreUnsupportedError();
   }
+  // The journal mode belongs to the file, so it is set only once this build
+  // owns (or creates) the schema. On a warm open it is already WAL.
+  conn.exec("PRAGMA journal_mode = WAL");
   if (observed.version === ANALYTICS_STORE_SCHEMA_VERSION && observed.epoch !== undefined) {
     return observed.epoch;
   }
@@ -467,8 +491,15 @@ function databaseFilesAreLinked(path: string): boolean {
 }
 
 async function removeDatabaseFiles(path: string): Promise<boolean> {
+  const [database, ...journals] = databaseFiles(path);
+  try {
+    if (existsSync(database)) await unlink(database);
+  } catch {
+    // Still in use (another process on Windows): its journals belong to it.
+    return false;
+  }
   let ok = true;
-  for (const candidate of databaseFiles(path)) {
+  for (const candidate of journals) {
     try {
       if (existsSync(candidate)) await unlink(candidate);
     } catch {
@@ -539,6 +570,7 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
         try {
           conn = await openOpenCodeSqliteWritable(path, {
             busyTimeoutMs: ANALYTICS_STORE_BUSY_TIMEOUT_MS,
+            deferJournalMode: true,
           });
           conn.exec(`PRAGMA journal_size_limit = ${ANALYTICS_STORE_JOURNAL_LIMIT_BYTES}`);
           // Random `message_id` index updates overflow the default page cache
@@ -578,14 +610,27 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
     return opening;
   }
 
-  /** Drop a handle whose file turned out corrupt mid-use; the next call rebuilds. */
-  async function discardIfCorrupt(error: unknown): Promise<void> {
-    if (!isCorruptionError(error)) return;
+  function dropHandle(): void {
     const handle = open;
     open = undefined;
     known = undefined;
     handle?.conn.close();
-    await removeDatabaseFiles(path);
+  }
+
+  /**
+   * After a failed operation: a newer schema stops all persistence, a replaced
+   * schema reopens on the next call, and a corrupt file is removed and rebuilt.
+   */
+  async function recoverFrom(error: unknown): Promise<void> {
+    if (error instanceof StoreUnsupportedError) {
+      unsupported = true;
+      dropHandle();
+    } else if (error instanceof StoreSchemaChangedError) {
+      dropHandle();
+    } else if (isCorruptionError(error)) {
+      dropHandle();
+      await removeDatabaseFiles(path);
+    }
   }
 
   function readMeta(handle: OpenStore, key: string): string | undefined {
@@ -596,6 +641,13 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
   function writeMeta(handle: OpenStore, key: string, value: string | null): void {
     if (value === null) handle.statements.deleteMeta.run([key]);
     else handle.statements.setMeta.run([key, value]);
+  }
+
+  /** Inside every transaction: the schema this handle was opened on still owns the file. */
+  function checkSchema(handle: OpenStore): void {
+    const version = Number(readMeta(handle, "schema_version") ?? "0");
+    if (version > ANALYTICS_STORE_SCHEMA_VERSION) throw new StoreUnsupportedError();
+    if (version !== ANALYTICS_STORE_SCHEMA_VERSION) throw new StoreSchemaChangedError();
   }
 
   function readRevision(handle: OpenStore): { epoch: string; revision: number } {
@@ -709,12 +761,9 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
   ): boolean {
     const { conn, statements } = handle;
     conn.exec("BEGIN IMMEDIATE");
-    const batch = delta?.take() ?? {
-      full: true,
-      dirty: new Set<string>(),
-      removed: new Set<string>(),
-    };
+    const batch = delta?.take() ?? emptyDeltaBatch(true);
     try {
+      checkSchema(handle);
       const current = readRevision(handle);
       if (current.epoch !== handle.epoch) {
         // Another process rebuilt the schema: every cached dictionary id is void.
@@ -793,6 +842,7 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
     // so no write on this connection can start inside it.
     conn.exec("BEGIN");
     try {
+      checkSchema(handle);
       if (readMeta(handle, "index.complete") !== "1") return undefined;
       if (readMeta(handle, "index.version") !== String(ANALYTICS_SNAPSHOT_VERSION))
         return undefined;
@@ -1023,8 +1073,49 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
     }
   }
 
-  async function cleanupLegacyOnce(): Promise<void> {
+  /**
+   * Import a valid legacy sidecar. `stored` is false only while a readable,
+   * valid sidecar could not be written, so it must stay on disk.
+   */
+  async function importLegacyPresentation(
+    handle: OpenStore,
+  ): Promise<{ stored: boolean; decoded?: WarmAnalyticsPresentation }> {
+    if (!existsSync(legacyPresentationPath)) return { stored: true };
+    let text: string;
+    try {
+      text = await readFile(legacyPresentationPath, "utf8");
+    } catch {
+      return { stored: false };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return { stored: true };
+    }
+    const decoded = decodeAnalyticsPresentation(parsed);
+    if (!decoded) return { stored: true };
+    try {
+      // Only the sidecar contract's fields are carried into the database.
+      writePresentationFile(handle, legacyPresentationFile(parsed as PersistedPresentationFile));
+      return { stored: true, decoded };
+    } catch (error) {
+      await recoverFrom(error);
+      return { stored: false };
+    }
+  }
+
+  /** Remove the legacy files once the database holds their replacement. */
+  async function cleanupLegacyOnce(handle: OpenStore): Promise<void> {
     if (legacyCleanupDone) return;
+    let hasPresentation: boolean;
+    try {
+      hasPresentation = readMeta(handle, "presentation.header") !== undefined;
+    } catch (error) {
+      await recoverFrom(error);
+      return;
+    }
+    if (!hasPresentation && !(await importLegacyPresentation(handle)).stored) return;
     legacyCleanupDone = true;
     await removeLegacyAnalyticsFiles(snapshotPath);
   }
@@ -1045,9 +1136,9 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
       const count = handle.conn.get<{ n: number }>(
         "SELECT count(*) AS n FROM analytics_occurrence",
       )?.n;
-      if (count === legacy.occurrences.size) await cleanupLegacyOnce();
+      if (count === legacy.occurrences.size) await cleanupLegacyOnce(handle);
     } catch (error) {
-      await discardIfCorrupt(error);
+      await recoverFrom(error);
       // The decoded legacy state still serves this process; the next
       // checkpoint is a full write because `known` stayed unset.
     }
@@ -1056,26 +1147,33 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
 
   /** Reassemble the legacy sidecar shape; `decodeAnalyticsPresentation` validates it. */
   function readPresentationFile(handle: OpenStore): unknown {
-    const header = readMeta(handle, "presentation.header");
-    if (header === undefined) return undefined;
-    const file = JSON.parse(header) as Record<string, unknown>;
-    if (file.presentation === null) return file;
-    const home: Record<string, unknown> = {};
-    const project: unknown[] = [];
-    const session: unknown[] = [];
-    for (const row of handle.conn.all<{ slot: string; payload: string }>(
-      "SELECT slot, payload FROM analytics_presentation ORDER BY ord",
-    )) {
-      const payload = JSON.parse(row.payload) as unknown;
-      if (row.slot.startsWith("home:")) home[row.slot.slice(5)] = payload;
-      else if (row.slot.startsWith("project:")) project.push(payload);
-      else if (row.slot.startsWith("session:")) session.push(payload);
-      else return undefined;
+    // One read transaction: the header certifies exactly the slots read with it.
+    handle.conn.exec("BEGIN");
+    try {
+      checkSchema(handle);
+      const header = readMeta(handle, "presentation.header");
+      if (header === undefined) return undefined;
+      const file = JSON.parse(header) as Record<string, unknown>;
+      if (file.presentation === null) return file;
+      const home: Record<string, unknown> = {};
+      const project: unknown[] = [];
+      const session: unknown[] = [];
+      for (const row of handle.conn.all<{ slot: string; payload: string }>(
+        "SELECT slot, payload FROM analytics_presentation ORDER BY ord",
+      )) {
+        const payload = JSON.parse(row.payload) as unknown;
+        if (row.slot.startsWith("home:")) home[row.slot.slice(5)] = payload;
+        else if (row.slot.startsWith("project:")) project.push(payload);
+        else if (row.slot.startsWith("session:")) session.push(payload);
+        else return undefined;
+      }
+      return {
+        ...file,
+        presentation: { home, project, ...(session.length > 0 ? { session } : {}) },
+      };
+    } finally {
+      rollback(handle.conn);
     }
-    return {
-      ...file,
-      presentation: { home, project, ...(session.length > 0 ? { session } : {}) },
-    };
   }
 
   /** A validated legacy sidecar reduced to the fields of the sidecar contract. */
@@ -1102,6 +1200,10 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
 
   function writePresentationFile(handle: OpenStore, file: PersistedPresentationFile): void {
     const { conn } = handle;
+    const header: PersistedPresentationFile = {
+      ...file,
+      presentation: file.presentation ? { home: {}, project: [] } : null,
+    };
     const slots: Array<{ slot: string; payload: string }> = [];
     const presentation = file.presentation;
     if (presentation) {
@@ -1109,8 +1211,9 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
         if (snapshot) slots.push({ slot: `home:${range}`, payload: JSON.stringify(snapshot) });
       }
       for (const entry of presentation.project) {
+        // JSON keeps the key NUL-free: node:sqlite truncates TEXT at a NUL.
         slots.push({
-          slot: `project:${entry[0]}\u0000${entry[1]}`,
+          slot: `project:${JSON.stringify([entry[0], entry[1]])}`,
           payload: JSON.stringify(entry),
         });
       }
@@ -1120,19 +1223,19 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
         slot: `session:${entry[0]}`,
         payload: JSON.stringify(entry),
       }));
-      let bytes = slots.reduce((sum, slot) => sum + slot.payload.length, 0);
-      for (const entry of sessions) bytes += entry.payload.length;
+      // UTF-8 bytes, like the sidecar file the budget was defined for.
+      let bytes = utf8Bytes(JSON.stringify(header));
+      for (const entry of [...slots, ...sessions]) bytes += utf8Bytes(entry.payload);
       while (sessions.length > 0 && bytes > PRESENTATION_MAX_SIDECAR_BYTES) {
-        bytes -= sessions.shift()?.payload.length ?? 0;
+        bytes -= utf8Bytes(sessions.shift()?.payload ?? "");
       }
       slots.push(...sessions);
     }
-    const header: PersistedPresentationFile = {
-      ...file,
-      presentation: presentation ? { home: {}, project: [] } : null,
-    };
     conn.exec("BEGIN IMMEDIATE");
     try {
+      checkSchema(handle);
+      // Keys written with a NUL separator by earlier candidate builds.
+      conn.exec("DELETE FROM analytics_presentation WHERE instr(CAST(slot AS BLOB), x'00') > 0");
       const existing = new Map(
         conn
           .all<{ slot: string; ord: number; hash: string }>(
@@ -1177,11 +1280,11 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
         try {
           const loaded = await loadIndex(handle);
           if (loaded) {
-            await cleanupLegacyOnce();
+            await cleanupLegacyOnce(handle);
             return loaded;
           }
         } catch (error) {
-          await discardIfCorrupt(error);
+          await recoverFrom(error);
           return undefined;
         }
         if (closed) return undefined;
@@ -1196,10 +1299,10 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
         try {
           writeIndex(handle, state, savedAtMs, delta);
         } catch (error) {
-          await discardIfCorrupt(error);
+          await recoverFrom(error);
           return false;
         }
-        await cleanupLegacyOnce();
+        await cleanupLegacyOnce(handle);
         return true;
       });
     },
@@ -1212,26 +1315,12 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
           const file = readPresentationFile(handle);
           if (file !== undefined) return decodeAnalyticsPresentation(file);
         } catch (error) {
-          await discardIfCorrupt(error);
+          await recoverFrom(error);
           return undefined;
         }
         // First run after the upgrade: import a valid legacy sidecar so the first
         // view stays warm. The file itself is removed with the legacy index.
-        if (!existsSync(legacyPresentationPath)) return undefined;
-        try {
-          const parsed = JSON.parse(await readFile(legacyPresentationPath, "utf8")) as unknown;
-          const decoded = decodeAnalyticsPresentation(parsed);
-          if (!decoded) return undefined;
-          // Only the sidecar contract's fields are carried into the database.
-          writePresentationFile(
-            handle,
-            legacyPresentationFile(parsed as PersistedPresentationFile),
-          );
-          return decoded;
-        } catch (error) {
-          await discardIfCorrupt(error);
-          return undefined;
-        }
+        return (await importLegacyPresentation(handle)).decoded;
       });
     },
 
@@ -1250,7 +1339,7 @@ export function createAnalyticsStore(options: AnalyticsStoreOptions): AnalyticsS
           writePresentationFile(handle, file);
           return true;
         } catch (error) {
-          await discardIfCorrupt(error);
+          await recoverFrom(error);
           return false;
         }
       });
