@@ -22,7 +22,7 @@ an 8 MiB journal size limit.
 | `analytics_str` | Append-only dictionary for session, provider, model and variant strings |
 | `analytics_occurrence` | One row per occurrence: `ord` (in-memory Map order), unique `message_id`, the fingerprint columns, `updated_at`, variant |
 | `analytics_session`, `analytics_project` | Index metadata rows |
-| `analytics_presentation` | One row per warm DTO slot (`home:<range>`, `project:<id>\0<range>`, `session:<id>`) with a content hash |
+| `analytics_presentation` | One row per warm DTO slot (`home:<range>`, `project:["<id>","<range>"]`, `session:<id>`) with a content hash |
 
 Fingerprints are not stored separately. Loading re-interns each occurrence with
 `fingerprintOf`, exactly as the engine's runtime `internFingerprint` does, so
@@ -46,9 +46,11 @@ at the right tuples, so this only affects which key a later lookup finds.)
   processes never interleave their rows: the last writer wins with a complete
   index.
 - Presentation slots are rewritten only when their hash changed. Session DTOs
-  are evicted oldest-first to keep the serialized presentation under 4 MiB.
-  The JSON sidecar additionally capped itself at the compact snapshot size; the
-  SQLite store keeps only the 4 MiB cap.
+  are evicted oldest-first to keep the presentation (header plus slots) under
+  4 MiB of UTF-8. The JSON sidecar additionally capped itself at the compact
+  snapshot size; the SQLite store keeps only the 4 MiB cap. Slot keys never
+  contain a NUL: `node:sqlite` returns TEXT cut at the first NUL, so such a key
+  could not be found or deleted again.
 - `cache_spill` is off on the store connection. Random `message_id` index
   updates overflow SQLite's default page cache in a large write, and every
   spill rewrites pages into the WAL. On a 1M-row synthetic index that turned a
@@ -64,7 +66,9 @@ at the right tuples, so this only affects which key a later lookup finds.)
 ## Loads
 
 - One read transaction covers the whole load, so a concurrent writer can never
-  mix two revisions into one in-memory index.
+  mix two revisions into one in-memory index. The warm presentation header and
+  its slots are likewise read in one transaction, so a header never certifies
+  another process's DTOs.
 - The load hands the worker's event loop back after each 50 ms of work. A
   warm cached Home or Project response that arrives meanwhile is served
   instead of waiting for the full scan. (The JSON baseline got a similar
@@ -82,9 +86,12 @@ at the right tuples, so this only affects which key a later lookup finds.)
   decoded with the existing JSON decoder and written as a whole index with its
   original `savedAt`; a valid sidecar is imported into the presentation slots.
 - The row count is verified. Only after a committed, verified SQLite index do
-  the legacy file, its sidecar and their orphaned temp files get removed. An
-  unreadable or older-version legacy file stays until a SQLite index commits
-  from a source rebuild.
+  the legacy file, its sidecar and their orphaned temp files get removed, and
+  only once the database holds a presentation: a valid sidecar not yet imported
+  is imported first, whichever of the two loads runs first. A sidecar that
+  cannot be read keeps both legacy files for the next start. An unreadable or
+  older-version legacy index stays until a SQLite index commits from a source
+  rebuild.
 - Migration is idempotent and resumable: an interrupted migration leaves the
   legacy files in place and repeats on the next start.
 
@@ -92,10 +99,16 @@ at the right tuples, so this only affects which key a later lookup finds.)
 
 - A corrupt database (`SQLITE_CORRUPT`, `SQLITE_NOTADB`) is replaced, never
   repaired: the store removes only `analytics.sqlite` and its `-wal`, `-shm`
-  and `-journal` files, then rebuilds from source.
+  and `-journal` files, then rebuilds from source. The journals are removed
+  only after the database file itself; if that fails (another process still
+  has it open on Windows), its journals are left alone.
 - A database whose `schema_version` is newer than this build is never written,
-  migrated or rebuilt; the engine runs from source in memory instead, so two
-  installed versions cannot destroy each other's cache.
+  migrated or rebuilt, and its journal mode is not changed; the engine runs
+  from source in memory instead, so two installed versions cannot destroy each
+  other's cache. The version is checked again inside every read and write
+  transaction, so a handle opened before another process upgraded the file
+  stops writing to it. A schema replaced by an older layout makes the handle
+  reopen (and rebuild) before its next write.
 - An older or missing schema is dropped and recreated (derived data only).
 - WAL lets readers proceed during a write. Writers serialize on
   `BEGIN IMMEDIATE` with the busy timeout; a write that cannot get the lock
@@ -118,10 +131,12 @@ user's state directory and only that user can change it.
   make a load slow or large; that requires write access to the user's state
   directory, as with the JSON file.
 - Session titles and project paths are stored exactly as the JSON index and
-  sidecar stored them. File permissions are the process default, as before.
-- Two processes that both find a corrupt database may both remove and
-  recreate it; each then rewrites a complete index, so the last writer wins.
-  Usage history is never involved.
+  sidecar stored them. Outside Windows the database is created `0600` in a
+  `0700` directory, like Usage history.
+- Recovery is not coordinated across processes. Two processes that both find
+  a corrupt database may both remove and recreate it, and one may remove the
+  other's fresh rebuild; each then rewrites a complete index, so the last
+  writer wins. Only derived data is lost, and Usage history is never involved.
 
 ## Returning to the baseline
 
