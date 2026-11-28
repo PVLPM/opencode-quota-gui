@@ -12,6 +12,7 @@ const execFileMock = vi.hoisted(() => ({ execFile: vi.fn() }));
 vi.mock("node:child_process", () => ({ execFile: execFileMock.execFile }));
 
 import {
+  AGY_FAILURE_MESSAGES,
   AGY_MINIMUM_VERSION,
   AGY_USAGE_ARGS,
   AGY_VERSION_ARGS,
@@ -78,6 +79,21 @@ function result(overrides: Partial<AgyProcessResult> = {}): AgyProcessResult {
   return { code: 0, stdout: "", stderr: "", timedOut: false, ...overrides };
 }
 
+/**
+ * Text a real `agy` failure can quote: the signed-in address, a private path and
+ * a credential-shaped token. No reader error may repeat any part of it.
+ */
+const LEAKY_EMAIL = "person@example.com";
+const LEAKY_PATH = "/home/person/.config/agy/credentials.json";
+const LEAKY_TOKEN = "ya29.a0AfH6SMBsecret-token-value";
+const LEAKY_CLI_TEXT = `${LEAKY_EMAIL} ${LEAKY_PATH} ${LEAKY_TOKEN}`;
+
+function expectNoCliTextLeak(message: string): void {
+  for (const fragment of [LEAKY_EMAIL, LEAKY_PATH, LEAKY_TOKEN, "/home/person", ".config"]) {
+    expect(message).not.toContain(fragment);
+  }
+}
+
 /** Serve the version probe, then the usage read, recording every request. */
 function runnerStub(params: { version?: AgyProcessResult; usage?: AgyProcessResult }): {
   runner: AgyProcessRunner;
@@ -129,6 +145,21 @@ describe("agy version gate", () => {
     expect(read.state).toBe("error");
     if (read.state !== "error") return;
     expect(read.message).toContain("cannot parse");
+    expect(read.failureCategory).toBe("local");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("reports a failed version probe as fixed text without quoting its stderr", async () => {
+    const { runner, requests } = runnerStub({
+      version: result({ code: 1, stderr: LEAKY_CLI_TEXT }),
+    });
+
+    const read = await readAgyUsage({ runner, binaryPath: BINARY });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe(AGY_FAILURE_MESSAGES.versionProbeFailed);
+    expectNoCliTextLeak(read.message);
     expect(read.failureCategory).toBe("local");
     expect(requests).toHaveLength(1);
   });
@@ -248,11 +279,15 @@ describe("agy usage envelope", () => {
 });
 
 describe("agy failure states", () => {
-  it("reports a status ERROR envelope", async () => {
+  it("reports a status ERROR envelope as fixed text and echoes none of its output", async () => {
     const read = await readAgyUsage({
       runner: runnerStub({
         usage: result({
-          stdout: JSON.stringify({ status: "ERROR", error: "quota backend unavailable" }),
+          stdout: JSON.stringify({
+            status: "ERROR",
+            error: `quota backend rejected ${LEAKY_CLI_TEXT}`,
+          }),
+          stderr: LEAKY_CLI_TEXT,
         }),
       }).runner,
       binaryPath: BINARY,
@@ -260,7 +295,25 @@ describe("agy failure states", () => {
 
     expect(read.state).toBe("error");
     if (read.state !== "error") return;
-    expect(read.message).toBe("Antigravity CLI error: quota backend unavailable");
+    expect(read.message).toBe(AGY_FAILURE_MESSAGES.usageEnvelopeFailed);
+    expect(read.message).not.toContain("quota backend");
+    expectNoCliTextLeak(read.message);
+  });
+
+  it("reports a different command as fixed text instead of quoting its name", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({
+        usage: result({
+          stdout: JSON.stringify({ status: "SUCCESS", command: { name: LEAKY_EMAIL } }),
+        }),
+      }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe(AGY_FAILURE_MESSAGES.usageDifferentCommand);
+    expectNoCliTextLeak(read.message);
   });
 
   it("reports exit 2 as a no-quota state, not a crash", async () => {
@@ -272,19 +325,55 @@ describe("agy failure states", () => {
     expect(read).toEqual({ state: "no-quota" });
   });
 
-  it("surfaces the JSON .error of an exit 1 failure when stderr is empty", async () => {
+  it("maps exit 1 to a fixed message without quoting the JSON error or stderr", async () => {
     const read = await readAgyUsage({
       runner: runnerStub({
-        usage: result({ code: 1, stdout: JSON.stringify({ error: "model not available" }) }),
+        usage: result({
+          code: 1,
+          stdout: JSON.stringify({ error: `model not available for ${LEAKY_CLI_TEXT}` }),
+          stderr: LEAKY_CLI_TEXT,
+        }),
       }).runner,
       binaryPath: BINARY,
     });
 
     expect(read.state).toBe("error");
     if (read.state !== "error") return;
-    expect(read.message).toBe("Antigravity CLI error: model not available");
+    expect(read.message).toBe(AGY_FAILURE_MESSAGES.usageFailed);
+    expect(read.message).not.toContain("model not available");
+    expectNoCliTextLeak(read.message);
     expect(read.failureCategory).toBe("provider_api");
     expect(read.exitCode).toBe(1);
+  });
+
+  it("reports a child that never started as a fixed message", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({
+        usage: result({ code: null, stderr: LEAKY_CLI_TEXT, spawnErrorCode: "ENOENT" }),
+      }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe(AGY_FAILURE_MESSAGES.spawnFailed);
+    expect(read.message).not.toContain("ENOENT");
+    expectNoCliTextLeak(read.message);
+    expect(read.failureCategory).toBe("local");
+    expect(read.exitCode).toBeUndefined();
+  });
+
+  it("reports an unexpected exit code as a bounded number and nothing else", async () => {
+    const read = await readAgyUsage({
+      runner: runnerStub({ usage: result({ code: 4, stderr: LEAKY_CLI_TEXT }) }).runner,
+      binaryPath: BINARY,
+    });
+
+    expect(read.state).toBe("error");
+    if (read.state !== "error") return;
+    expect(read.message).toBe("Antigravity CLI exited with code 4.");
+    expectNoCliTextLeak(read.message);
+    expect(read.exitCode).toBe(4);
   });
 
   it("treats exit 3 as a failure after partial output", async () => {
@@ -400,6 +489,46 @@ describe("agy binary resolution", () => {
     });
 
     expect(found).toBeNull();
+  });
+
+  it("skips empty and relative PATH entries instead of resolving them from the cwd", async () => {
+    const seen: string[] = [];
+    const found = await resolveAgyBinaryPath({
+      platform: "linux",
+      env: { PATH: "::.:relative/bin:/opt/agy/bin:" },
+      isFile: async (candidate) => {
+        seen.push(candidate);
+        return candidate === "/opt/agy/bin/agy";
+      },
+    });
+
+    expect(found).toBe("/opt/agy/bin/agy");
+    expect(seen).toEqual(["/opt/agy/bin/agy"]);
+  });
+
+  it("finds nothing when every PATH entry is relative or empty", async () => {
+    const found = await resolveAgyBinaryPath({
+      platform: "linux",
+      env: { PATH: ":.:relative/bin:./bin" },
+      isFile: async () => true,
+    });
+
+    expect(found).toBeNull();
+  });
+
+  it("skips a relative Windows PATH entry", async () => {
+    const seen: string[] = [];
+    const found = await resolveAgyBinaryPath({
+      platform: "win32",
+      env: { PATH: '"relative\\tools";;C:\\Tools' },
+      isFile: async (candidate) => {
+        seen.push(candidate);
+        return candidate === "C:\\Tools\\agy.exe";
+      },
+    });
+
+    expect(found).toBe("C:\\Tools\\agy.exe");
+    expect(seen).toEqual(["C:\\Tools\\agy.exe"]);
   });
 });
 

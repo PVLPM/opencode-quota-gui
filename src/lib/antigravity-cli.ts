@@ -38,6 +38,34 @@ export const AGY_VERSION_ARGS = ["--version"] as const;
 const EXEC_MAX_BUFFER_BYTES = 1024 * 1024;
 const ERROR_TEXT_MAX_LENGTH = 200;
 
+/**
+ * Fixed failure text for every known outcome.
+ *
+ * `agy` diagnostics quote the signed-in account email, private paths and
+ * occasionally a credential fragment, and a provider error reaches both the
+ * quota status report and the persisted state cache. Raw stdout and stderr
+ * therefore never appear in an error, a diagnostic or a log: each known failure
+ * maps to one stable message here, and the process facts worth keeping stay
+ * typed (`exitCode`, `version`) instead of being copied out of that text.
+ */
+export const AGY_FAILURE_MESSAGES = {
+  versionProbeTimeout: "Antigravity CLI version probe timed out.",
+  versionProbeFailed:
+    "Antigravity CLI version probe failed. Run agy --version to check the installation.",
+  versionUnparsable: "Antigravity CLI printed a version this provider cannot parse.",
+  spawnFailed: "Antigravity CLI could not be started. Check the agy installation.",
+  usageEnvelopeFailed:
+    "Antigravity CLI reported a failing status for its usage output. Run agy to see the full message.",
+  usageDifferentCommand: "Antigravity CLI ran a command other than its usage command.",
+  usageNoCommand: "Antigravity CLI returned no command name for its usage output.",
+  usageModelTurn:
+    "Antigravity CLI started a model turn instead of running the usage command, which may have spent quota. Update agy and retry.",
+  usageUnparsable: "Antigravity CLI returned unparsable output.",
+  usageFailed:
+    "Antigravity CLI failed while reading usage (exit 1). Run agy to see the full message.",
+  usagePartial: "Antigravity CLI stopped after partial output (exit 3).",
+} as const;
+
 export interface AgyProcessRequest {
   file: string;
   args: readonly string[];
@@ -203,9 +231,11 @@ async function isFile(path: string): Promise<boolean> {
 /**
  * Resolve the `agy` executable without a shell.
  *
- * Every `PATH` directory is checked for the platform's executable name, then the
- * Windows installer location `%LOCALAPPDATA%\agy\bin\agy.exe` is checked because
- * an already-running shell may predate the installer's PATH entry.
+ * Every absolute `PATH` directory is checked for the platform's executable name,
+ * then the Windows installer location `%LOCALAPPDATA%\agy\bin\agy.exe` is checked
+ * because an already-running shell may predate the installer's PATH entry. An
+ * empty or relative `PATH` entry is skipped: it would resolve against the process
+ * working directory, which is not where the CLI was installed.
  */
 export async function resolveAgyBinaryPath(
   params: {
@@ -223,8 +253,11 @@ export async function resolveAgyBinaryPath(
   const candidates: string[] = [];
 
   for (const rawEntry of (env.PATH ?? "").split(platform === "win32" ? ";" : ":")) {
-    const entry = rawEntry.trim().replace(/^"(.*)"$/u, "$1");
-    if (!entry) continue;
+    const entry = rawEntry
+      .trim()
+      .replace(/^"(.*)"$/u, "$1")
+      .trim();
+    if (!entry || !paths.isAbsolute(entry)) continue;
     for (const name of names) {
       const candidate = paths.resolve(entry, name);
       const key = platform === "win32" ? candidate.toLowerCase() : candidate;
@@ -317,17 +350,14 @@ function readBuckets(usageData: unknown): AgyUsageBucket[] {
   return buckets;
 }
 
-/** The `.error` text of a failed CLI envelope, when it carries one. */
-function envelopeError(payload: unknown): string | undefined {
-  if (!isRecord(payload)) return undefined;
-  return typeof payload.error === "string" && payload.error.trim()
-    ? sanitizeLine(payload.error)
-    : undefined;
+/** A timeout reports its configured bound only; nothing from the CLI is echoed. */
+function usageTimeoutMessage(timeoutMs: number): string {
+  return `Antigravity CLI usage read timed out after ${Math.round(timeoutMs / 1000)}s.`;
 }
 
-function stderrOrFallback(result: AgyProcessResult, fallback: string): string {
-  const stderr = sanitizeLine(result.stderr);
-  return stderr || fallback;
+/** An exit code is a bounded process fact; every other part of this message is fixed. */
+function unexpectedExitMessage(code: number): string {
+  return `Antigravity CLI exited with code ${code}.`;
 }
 
 /**
@@ -337,28 +367,25 @@ function stderrOrFallback(result: AgyProcessResult, fallback: string): string {
  * command name together with `num_turns > 0` or a `conversation_id` proves the
  * CLI ran a model turn instead of the slash command, which may have spent quota;
  * that is reported as an error and never as usage.
+ *
+ * Every failing branch reports fixed text: the envelope's own `status`, `error`
+ * and `command.name` strings are CLI output and are inspected, never echoed.
  */
 function readEnvelope(payload: unknown, observedAtMs: number): AgyUsageReadResult {
   if (!isRecord(payload)) {
-    return { state: "error", message: "Antigravity CLI returned unparsable output." };
+    return { state: "error", message: AGY_FAILURE_MESSAGES.usageUnparsable };
   }
 
   const command = isRecord(payload.command) ? payload.command : undefined;
   const commandName = typeof command?.name === "string" ? command.name.trim() : undefined;
 
   if (payload.status !== "SUCCESS") {
-    if (commandName && commandName !== "usage") {
-      return {
-        state: "error",
-        message: `Antigravity CLI ran the "${sanitizeLine(commandName)}" command instead of usage.`,
-      };
-    }
-    const reported = envelopeError(payload);
     return {
       state: "error",
-      message: reported
-        ? `Antigravity CLI error: ${reported}`
-        : `Antigravity CLI returned status ${sanitizeLine(String(payload.status ?? "unknown"))}.`,
+      message:
+        commandName && commandName !== "usage"
+          ? AGY_FAILURE_MESSAGES.usageDifferentCommand
+          : AGY_FAILURE_MESSAGES.usageEnvelopeFailed,
     };
   }
 
@@ -367,20 +394,19 @@ function readEnvelope(payload: unknown, observedAtMs: number): AgyUsageReadResul
     if (numTurns > 0 || typeof payload.conversation_id === "string") {
       return {
         state: "error",
-        message:
-          "Antigravity CLI started a model turn instead of running the usage command, which may have spent quota. Update agy and retry.",
+        message: AGY_FAILURE_MESSAGES.usageModelTurn,
       };
     }
     return {
       state: "error",
-      message: "Antigravity CLI returned no command name for its usage output.",
+      message: AGY_FAILURE_MESSAGES.usageNoCommand,
     };
   }
 
   if (commandName !== "usage") {
     return {
       state: "error",
-      message: `Antigravity CLI ran the "${sanitizeLine(commandName)}" command instead of usage.`,
+      message: AGY_FAILURE_MESSAGES.usageDifferentCommand,
     };
   }
 
@@ -392,8 +418,9 @@ function readEnvelope(payload: unknown, observedAtMs: number): AgyUsageReadResul
 /**
  * Run the gated read: resolve the binary, check its version, then read usage.
  *
- * Exit codes: `0` success, `1` error (message in the JSON `.error`), `2` no
- * account quota (for example API-key mode), `3` output that failed partway.
+ * Exit codes: `0` success, `1` error (the JSON `.error` explains it to the CLI
+ * user, never to this reader), `2` no account quota (for example API-key mode),
+ * `3` output that failed partway.
  */
 export async function readAgyUsage(
   params: {
@@ -425,14 +452,16 @@ export async function readAgyUsage(
   if (versionResult.timedOut) {
     return {
       state: "error",
-      message: "Antigravity CLI version probe timed out.",
+      message: AGY_FAILURE_MESSAGES.versionProbeTimeout,
       failureCategory: "local",
     };
   }
   if (versionResult.code !== 0) {
     return {
       state: "error",
-      message: `Antigravity CLI version probe failed (${stderrOrFallback(versionResult, `exit ${versionResult.code ?? "unknown"}`)}).`,
+      // The probe's stderr and the spawn errno are process output; neither is
+      // copied into the message.
+      message: AGY_FAILURE_MESSAGES.versionProbeFailed,
       failureCategory: "local",
     };
   }
@@ -441,7 +470,7 @@ export async function readAgyUsage(
   if (!version) {
     return {
       state: "error",
-      message: "Antigravity CLI printed a version this provider cannot parse.",
+      message: AGY_FAILURE_MESSAGES.versionUnparsable,
       failureCategory: "local",
     };
   }
@@ -458,7 +487,7 @@ export async function readAgyUsage(
   if (usageResult.timedOut) {
     return {
       state: "error",
-      message: `Antigravity CLI usage read timed out after ${Math.round((params.usageTimeoutMs ?? AGY_USAGE_TIMEOUT_MS) / 1000)}s.`,
+      message: usageTimeoutMessage(params.usageTimeoutMs ?? AGY_USAGE_TIMEOUT_MS),
       failureCategory: "local",
     };
   }
@@ -469,30 +498,34 @@ export async function readAgyUsage(
       return readEnvelope(payload, params.nowMs ?? Date.now());
     case 2:
       return { state: "no-quota" };
-    case 1: {
-      const reported = envelopeError(payload);
+    case 1:
       return {
         state: "error",
-        message: reported
-          ? `Antigravity CLI error: ${reported}`
-          : `Antigravity CLI failed (${stderrOrFallback(usageResult, "exit 1")}).`,
+        message: AGY_FAILURE_MESSAGES.usageFailed,
         failureCategory: "provider_api",
         exitCode: 1,
       };
-    }
     case 3:
       return {
         state: "error",
-        message: "Antigravity CLI stopped after partial output (exit 3).",
+        message: AGY_FAILURE_MESSAGES.usagePartial,
         failureCategory: "provider_api",
         exitCode: 3,
+      };
+    case null:
+      // No exit code means the child never started, so there is no CLI output
+      // to report at all.
+      return {
+        state: "error",
+        message: AGY_FAILURE_MESSAGES.spawnFailed,
+        failureCategory: "local",
       };
     default:
       return {
         state: "error",
-        message: `Antigravity CLI did not run (${usageResult.spawnErrorCode ?? stderrOrFallback(usageResult, "unknown error")}).`,
+        message: unexpectedExitMessage(usageResult.code),
         failureCategory: "local",
-        ...(usageResult.code === null ? {} : { exitCode: usageResult.code }),
+        exitCode: usageResult.code,
       };
   }
 }
