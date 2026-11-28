@@ -12,7 +12,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { ProviderCard, QuotaCardRow, QuotaSnapshot } from "../src/contracts/dashboard.js";
+import type {
+  DeleteImportedHistoryResult,
+  ProviderCard,
+  QuotaCardRow,
+  QuotaSnapshot,
+} from "../src/contracts/dashboard.js";
 import type { RowId } from "../src/contracts/identity.js";
 import {
   markQuotaObservationCycle,
@@ -885,6 +890,52 @@ describe("deleting imported history", () => {
     expect(result).toEqual({ invocations: 1, rateLimitSeries: 0 });
     expect(await invocationCount("claude-code")).toBe(0);
     expect(db.getImportState("claude-code")).toBeUndefined();
+  });
+
+  it("leaves nothing restored when another host deletes mid-scan", async () => {
+    await writeClaude(claudeLine());
+    // Two hosts, two connections, two importer gates: only the store's
+    // per-harness generation can fence a scan in the other process.
+    const hostA = await store();
+    const hostB = await store();
+    let clock = BASE;
+    let deletion: DeleteImportedHistoryResult | undefined;
+    const importerB = createUsageImporter({
+      store: async () => hostB,
+      loadSettings: async () => ({ claudeCode: true, codex: false }),
+      rootFor: (harness) => {
+        // Runs after host B read its generation and before it reads a single
+        // transcript, so the deletion lands in the middle of this scan.
+        if (deletion === undefined) deletion = hostA.deleteImportedHistory(harness);
+        return claudeRoot;
+      },
+      now: () => clock,
+    });
+
+    await importerB.maybeRun(MINUTE);
+
+    expect(deletion).toEqual({ invocations: 0, rateLimitSeries: 0 });
+    expect(await invocationCount("claude-code")).toBe(0);
+    // The chunk wrote neither rows nor the cursor it carried.
+    expect(hostB.getImportState("claude-code")).toBeUndefined();
+
+    // The next opportunity has no cursor to resume, so it re-reads the whole
+    // transcript from offset 0 and stays idempotent through the dedupe keys.
+    clock += 2 * MINUTE;
+    await importerB.maybeRun(MINUTE);
+    expect(await invocationCount("claude-code")).toBe(1);
+    expect(hostB.getImportState("claude-code")).toMatchObject({ enabled: true, status: "ok" });
+    expect(hostB.getImportState("claude-code")?.cursor).toBeTypeOf("string");
+    const result = await importerB.queryActivity(
+      {
+        intervals: [{ startMs: 0, endMs: BASE + 60 * MINUTE }],
+        providerIds: ["alpha"],
+      },
+      ["claude-code"],
+    );
+    const claude = result.intervals[0]?.entries.find((entry) => entry.providerId === "anthropic");
+    expect(claude?.stepCount).toBe(1);
+    expect(claude?.tokens.input).toBe(10);
   });
 
   it("re-reads from offset 0 after a deletion without duplicating rows", async () => {

@@ -20,10 +20,16 @@
  * no new harness scan starts after the flag is off.
  *
  * Deletion semantics: turning a switch off keeps what was already imported.
- * `deleteImportedHistory` is the separate, explicit removal; it shares this
- * module's single-flight so a scan already in progress cannot re-insert rows
- * after the commit, and it drops the cursor so a later run re-reads from
- * offset 0 (idempotent through the dedupe keys).
+ * `deleteImportedHistory` is the separate, explicit removal; it drops the cursor
+ * so a later run re-reads from offset 0 (idempotent through the dedupe keys).
+ *
+ * Cross-process deletion: several hosts share one `usage-history.sqlite`, so
+ * this module's single-flight only serialises this process. A scan reads its
+ * harness's import generation when it starts and passes it to every write it
+ * commits; a deletion in another host increments that counter in its own
+ * transaction, so a scan that awaited transcript I/O across it writes nothing
+ * and abandons the harness for that opportunity instead of restoring the
+ * deleted rows and cursor.
  */
 import type { DeleteImportedHistoryResult } from "../contracts/dashboard.js";
 import { USAGE_IMPORT_HARNESSES, type UsageImportHarness } from "../contracts/usage.js";
@@ -103,6 +109,8 @@ export interface UsageImporter {
    * then removed), and no run starts until the deletion has committed, so an
    * in-flight import can never re-insert rows behind it. The cursor row goes
    * with the data, so the harness re-reads from offset 0 when it runs again.
+   * A scan in another host is superseded by the store's generation fence
+   * rather than by this gate.
    */
   deleteImportedHistory(harness: UsageImportHarness): Promise<DeleteImportedHistoryResult>;
   /** Resolves after queued ownership writes and imports settle. */
@@ -166,11 +174,23 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
     return value;
   }
 
-  function persist(store: UsageStore, harness: UsageImportHarness, state: UsageImportState): void {
+  /**
+   * Persist one harness's import state. False means a deletion committed after
+   * this opportunity read the generation, so the scan is abandoned: writing the
+   * state back would restore a cursor for history that no longer exists.
+   */
+  function persist(
+    store: UsageStore,
+    harness: UsageImportHarness,
+    state: UsageImportState,
+    generation: number,
+  ): boolean {
     try {
-      store.setImportState(harness, state);
+      return store.setImportState(harness, state, generation) === "recorded";
     } catch {
       warnOnce(harness, "usage import state failed", "state-failed");
+      // A write error is not a supersession; the scan policy is unchanged.
+      return true;
     }
   }
 
@@ -179,13 +199,21 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
     harness: UsageImportHarness,
     state: UsageImportState,
     nextCursor: string,
+    generation: number,
   ): void {
-    persist(store, harness, {
-      enabled: true,
-      status: "unavailable",
-      cursor: state.cursor ?? nextCursor,
-      ...(state.lastImportedAtMs !== undefined ? { lastImportedAtMs: state.lastImportedAtMs } : {}),
-    });
+    persist(
+      store,
+      harness,
+      {
+        enabled: true,
+        status: "unavailable",
+        cursor: state.cursor ?? nextCursor,
+        ...(state.lastImportedAtMs !== undefined
+          ? { lastImportedAtMs: state.lastImportedAtMs }
+          : {}),
+      },
+      generation,
+    );
   }
 
   function readerOptions<TCursor extends object>(
@@ -203,21 +231,29 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
     store: UsageStore,
     state: UsageImportState,
     cursor: ClaudeCodeImportCursor | undefined,
+    generation: number,
   ): Promise<void> {
     const root = rootFor("claude-code");
     const batch = await readClaudeCodeHistory(readerOptions(root, cursor));
     const nextCursor = JSON.stringify(batch.cursor);
     if (!batch.available) {
-      persistUnavailable(store, "claude-code", state, nextCursor);
+      persistUnavailable(store, "claude-code", state, nextCursor, generation);
       return;
     }
-    store.recordImportedInvocations("claude-code", batch.invocations);
-    persist(store, "claude-code", {
-      enabled: true,
-      status: "ok",
-      cursor: nextCursor,
-      lastImportedAtMs: now(),
+    // Rows and cursor land in one fenced transaction: a deletion committed
+    // while this scan awaited transcript I/O supersedes both.
+    const outcome = store.commitImportChunk({
+      harness: "claude-code",
+      invocations: batch.invocations,
+      state: {
+        enabled: true,
+        status: "ok",
+        cursor: nextCursor,
+        lastImportedAtMs: now(),
+      },
+      expectedGeneration: generation,
     });
+    if (outcome === "superseded") return;
     warned.delete("claude-code");
   }
 
@@ -225,12 +261,13 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
     store: UsageStore,
     state: UsageImportState,
     cursor: CodexImportCursor | undefined,
+    generation: number,
   ): Promise<void> {
     const root = rootFor("codex");
     const batch = await readCodexHistory(readerOptions(root, cursor));
     const nextCursor = JSON.stringify(batch.cursor);
     if (!batch.available) {
-      persistUnavailable(store, "codex", state, nextCursor);
+      persistUnavailable(store, "codex", state, nextCursor, generation);
       return;
     }
     const invocations: {
@@ -261,18 +298,29 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
         });
       }
     }
-    store.recordImportedInvocations("codex", invocations);
-    store.recordCodexRateLimitObservations(observations);
-    persist(store, "codex", {
-      enabled: true,
-      status: "ok",
-      cursor: nextCursor,
-      lastImportedAtMs: now(),
+    // One transaction for the invocations, the imported rate-limit series and
+    // the cursor, fenced on the generation this scan started from.
+    const outcome = store.commitImportChunk({
+      harness: "codex",
+      invocations,
+      codexRateLimits: observations,
+      state: {
+        enabled: true,
+        status: "ok",
+        cursor: nextCursor,
+        lastImportedAtMs: now(),
+      },
+      expectedGeneration: generation,
     });
+    if (outcome === "superseded") return;
     warned.delete("codex");
   }
 
-  async function runHarness(harness: UsageImportHarness, store: UsageStore): Promise<void> {
+  async function runHarness(
+    harness: UsageImportHarness,
+    store: UsageStore,
+    generation: number,
+  ): Promise<void> {
     const previous = store.getImportState(harness);
     const resume = previous?.enabled === true;
     // A transition to on restarts from offset 0; subsequent runs resume the
@@ -286,18 +334,20 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
             : {}),
           ...(previous?.status !== undefined ? { status: previous.status } : {}),
         };
-    if (!resume) persist(store, harness, state);
+    if (!resume && !persist(store, harness, state, generation)) return;
     if (harness === "claude-code") {
       await importClaudeCode(
         store,
         state,
         resume ? parseCursor<ClaudeCodeImportCursor>(previous?.cursor) : undefined,
+        generation,
       );
     } else {
       await importCodex(
         store,
         state,
         resume ? parseCursor<CodexImportCursor>(previous?.cursor) : undefined,
+        generation,
       );
     }
   }
@@ -313,31 +363,43 @@ export function createUsageImporter(options: UsageImporterOptions): UsageImporte
       } catch {
         continue;
       }
+      // The fence baseline for this opportunity, read before any write it
+      // commits: a deletion that lands from here on supersedes the whole scan.
+      const generation = store.getImportGeneration(harness);
       const previous = store.getImportState(harness);
       if (!enabled) {
         if (previous?.enabled !== false) {
-          persist(store, harness, {
-            enabled: false,
-            ...(previous?.cursor !== undefined ? { cursor: previous.cursor } : {}),
-            ...(previous?.lastImportedAtMs !== undefined
-              ? { lastImportedAtMs: previous.lastImportedAtMs }
-              : {}),
-            ...(previous?.status !== undefined ? { status: previous.status } : {}),
-          });
+          persist(
+            store,
+            harness,
+            {
+              enabled: false,
+              ...(previous?.cursor !== undefined ? { cursor: previous.cursor } : {}),
+              ...(previous?.lastImportedAtMs !== undefined
+                ? { lastImportedAtMs: previous.lastImportedAtMs }
+                : {}),
+              ...(previous?.status !== undefined ? { status: previous.status } : {}),
+            },
+            generation,
+          );
         }
         continue;
       }
       try {
-        await runHarness(harness, store);
+        await runHarness(harness, store, generation);
       } catch {
         warnOnce(harness, "usage import failed", "import-failed");
         try {
           const current = store.getImportState(harness);
-          store.setImportState(harness, {
-            ...(current ?? {}),
-            enabled: true,
-            status: "error",
-          });
+          store.setImportState(
+            harness,
+            {
+              ...(current ?? {}),
+              enabled: true,
+              status: "error",
+            },
+            generation,
+          );
         } catch {
           // the failed import already logged one controlled line
         }
