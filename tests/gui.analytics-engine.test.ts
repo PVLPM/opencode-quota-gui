@@ -4727,4 +4727,54 @@ describe("analytics engine: interval activity", () => {
     expect(entries.some((entry) => entry.effort === "")).toBe(false);
     await second.engine.close();
   });
+
+  it("reports incomplete activity coverage when the index starts after the interval", async () => {
+    const db = baseDb();
+    const { engine } = harness(db);
+    // The 24h refresh indexes only the last day, so a two-day-old interval was
+    // never read: an empty result there is not evidence of no activity.
+    await engine.home("24h");
+    await flushAsync();
+
+    const result = await engine.activity({
+      intervals: [{ startMs: NOW - 2 * DAY, endMs: NOW - 2 * DAY + HOUR }],
+      providerIds: ["openai"],
+    });
+
+    expect(result.coverage?.complete).toBe(false);
+    await engine.close();
+  });
+
+  it("reports incomplete activity coverage when the index ends before the interval", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.home("24h");
+    await flushAsync();
+    // Two hours later the newest interval reaches past the last indexed sync.
+    setNow(NOW + 2 * HOUR);
+
+    const result = await engine.activity({
+      intervals: [{ startMs: NOW + HOUR, endMs: NOW + HOUR + HOUR / 2 }],
+      providerIds: ["openai"],
+    });
+
+    expect(result.coverage).toMatchObject({ complete: false, stale: true });
+    await engine.close();
+  });
+
+  it("certifies activity coverage for an interval inside the indexed extent", async () => {
+    const db = baseDb();
+    const { engine } = harness(db);
+    await engine.home("24h");
+    await flushAsync();
+
+    const result = await engine.activity({
+      intervals: [{ startMs: NOW - 2 * HOUR, endMs: NOW - HOUR }],
+      providerIds: ["openai"],
+    });
+
+    expect(result.coverage).toEqual({ complete: true, stale: false });
+    expect(result.intervals[0]?.entries.length).toBeGreaterThan(0);
+    await engine.close();
+  });
 });

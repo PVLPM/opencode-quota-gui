@@ -824,6 +824,52 @@ describe("usage snapshot: ranges and coverage", () => {
 });
 
 describe("usage snapshot: unavailable activity and storage", () => {
+  it("never certifies attribution from an activity index that does not cover the intervals", async () => {
+    const db = await store();
+    const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: fiveHour, remaining: 80 }]);
+    record(db, at(1), [{ series: fiveHour, remaining: 70 }]);
+
+    const snapshot = await build(db, {
+      activity: async (query) => ({
+        ...aligned(query, () => [entry()]),
+        coverage: { complete: false, stale: true },
+      }),
+    }).usage({ range: "lifetime" });
+
+    // A partially indexed or stale index cannot prove that no activity was
+    // missed, so no interval may be certified as completely attributed.
+    expect(snapshot.activityUnavailable).toBe(true);
+    expect(snapshot.models).toEqual([]);
+    const window = snapshot.accounts[0]?.windows[0];
+    // Recorded quota history stays available and displayed.
+    expect(window?.points).toHaveLength(2);
+    expect(window?.intervals[0]?.burnPercentPoints).toBe(10);
+    expect(window?.intervals[0]?.attributedBurnPercentPoints).toBe(0);
+    expect(window?.intervals[0]?.unattributedBurnPercentPoints).toBe(10);
+    expect(window?.intervals[0]?.activity).toEqual([]);
+    expect(window?.breakdown).toEqual([]);
+  });
+
+  it("attributes burn when the activity index certifies its coverage", async () => {
+    const db = await store();
+    const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: fiveHour, remaining: 80 }]);
+    record(db, at(1), [{ series: fiveHour, remaining: 70 }]);
+
+    const snapshot = await build(db, {
+      activity: async (query) => ({
+        ...aligned(query, () => [entry()]),
+        coverage: { complete: true, stale: false },
+      }),
+    }).usage({ range: "lifetime" });
+
+    expect(snapshot.activityUnavailable).toBeUndefined();
+    const interval = snapshot.accounts[0]?.windows[0]?.intervals[0];
+    expect(interval?.attributedBurnPercentPoints).toBe(10);
+    expect(interval?.unattributedReason).toBeUndefined();
+  });
+
   it("returns quota history without attribution when activity throws", async () => {
     const db = await store();
     const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
