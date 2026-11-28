@@ -158,6 +158,16 @@ inside 2×. The tolerance absorbs scheduling jitter only, never a known gap.
 and epoch, only for intervals without a boundary, clamped never negative
 (increase ⇒ boundary, D4). Never summed across series/windows.
 
+### D6.1 Unconfirmed account continuity
+A provider whose output names no account (registration
+`usageAccountContinuity: "unconfirmed"`; today only `antigravity-cli`) cannot
+prove two measurements belong to the same subscription: a CLI login switch
+would otherwise splice two accounts into one series and fabricate burn. Every
+observation is still stored and drawn, and equal readings keep their normal
+link, but a decrease between two runs is an `uncertain` boundary (null burn,
+nothing attributed). Epochs and the current axis are unchanged. The Google AGY
+companion keeps its account-scoped burn.
+
 ### D7 Attribution (estimate)
 For a series interval with burn ΔQ > 0: eligible activity = owned steps whose
 `completedAtMs ∈ (t0, t1]`, provider matches the card provider, and, for
@@ -423,6 +433,12 @@ imported in v1.4.0 (deferred, below).
 - External use of the same subscription outside OpenCode is never excluded;
   the UI discloses that attribution is an estimate.
 
+- Antigravity CLI Usage history shows observations but never consumption
+  (D6.1) until the CLI exposes an account identity or change signal.
+- While an Antigravity CLI window is unused the CLI reports its reset as
+  "now + window length", so each poll stores a new run (no burn, no false
+  reset); it stops once the window starts.
+
 ## Open product questions (owner)
 
 - Q1 — the owner feedback sentence "There is no …" was cut off; it was not
@@ -463,3 +479,13 @@ imported in v1.4.0 (deferred, below).
   (needs a card-id migration); pre-fix development databases may hold a shared
   `codex-import:unknown` series without thread provenance (no released build
   wrote it).
+- Final acceptance round: Antigravity CLI account continuity (D6.1) with a
+  two-account regression test; error toast keeps the dark raised surface (the
+  library critical surface is near-white in the light scheme, 1.6:1 → 12.8:1);
+  the synthetic smoke links one Usage window to a quota row with a runway so
+  the projection line is visually verified. Live provider acceptance: the
+  official Antigravity CLI read succeeded (3 buckets, exact Gemini weekly reset,
+  no account identity in the output, separate provider-scope card); Mistral Vibe
+  had no readable credential on this machine (no `MISTRAL_API_KEY`, no
+  `~/.vibe/.env`, no stored OpenCode key), so personal Pro budget acquisition is
+  unverified live.
