@@ -9,15 +9,26 @@ export interface SqliteConn {
   close(): void;
 }
 
+/** A reusable prepared statement (bulk writes must not re-prepare per row). */
+export interface PreparedSqliteStatement {
+  all<T = unknown>(params?: unknown[]): T[];
+  get<T = unknown>(params?: unknown[]): T | null;
+  /** Streams rows without materializing the whole result set. */
+  iterate<T = unknown>(params?: unknown[]): IterableIterator<T>;
+  run(params?: unknown[]): void;
+}
+
 /** A read/write connection; every mutation is a prepared statement or `exec`. */
 export interface WritableSqliteConn extends SqliteConn {
   run(sql: string, params?: unknown[]): void;
+  prepare(sql: string): PreparedSqliteStatement;
 }
 
 interface SqliteStatement {
   all(...params: unknown[]): unknown[];
   get(...params: unknown[]): unknown;
   run(...params: unknown[]): unknown;
+  iterate(...params: unknown[]): IterableIterator<unknown>;
 }
 
 interface BunSqliteDatabase {
@@ -176,6 +187,24 @@ function writableConn(db: NodeSqliteDatabase | BunSqliteDatabase): WritableSqlit
 
     run(sql: string, params?: unknown[]): void {
       db.prepare(sql).run(...toParams(params));
+    },
+
+    prepare(sql: string): PreparedSqliteStatement {
+      const stmt = db.prepare(sql);
+      return {
+        all<T = unknown>(params?: unknown[]): T[] {
+          return stmt.all(...toParams(params)) as T[];
+        },
+        get<T = unknown>(params?: unknown[]): T | null {
+          return (stmt.get(...toParams(params)) as T | undefined) ?? null;
+        },
+        iterate<T = unknown>(params?: unknown[]): IterableIterator<T> {
+          return stmt.iterate(...toParams(params)) as IterableIterator<T>;
+        },
+        run(params?: unknown[]): void {
+          stmt.run(...toParams(params));
+        },
+      };
     },
   };
 }

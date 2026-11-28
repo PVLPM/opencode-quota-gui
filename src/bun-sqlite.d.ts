@@ -9,6 +9,7 @@ declare module "bun:sqlite" {
     all(...params: any[]): any[];
     get(...params: any[]): any;
     run(...params: any[]): any;
+    iterate(...params: any[]): IterableIterator<any>;
   }
 
   export class Database {
