@@ -141,11 +141,13 @@ const ATTRIBUTION_ROW_RULES: Readonly<Record<string, AttributionRowRule>> = {
   "openai\u0000window:code_review": { unattributable: true },
   // Fable weekly is the only model-scoped Claude Agent window.
   "claude-agent\u0000named:Fable weekly": { modelFragments: ["fable"] },
-  // AGY reports one family row per model family (`agyBucketRowKey`).
+  // AGY reports one family row per model family and quota window, keyed by
+  // `agyBucketRowKey` as `named:${family} ${window}` with window `weekly` or
+  // `five_hour` (never the display label `5h`).
   "google-agy\u0000named:Gemini Models weekly": { modelFragments: ["gemini"] },
-  "google-agy\u0000named:Gemini Models 5h": { modelFragments: ["gemini"] },
+  "google-agy\u0000named:Gemini Models five_hour": { modelFragments: ["gemini"] },
   "google-agy\u0000named:Claude and GPT models weekly": { modelFragments: ["claude", "gpt"] },
-  "google-agy\u0000named:Claude and GPT models 5h": { modelFragments: ["claude", "gpt"] },
+  "google-agy\u0000named:Claude and GPT models five_hour": { modelFragments: ["claude", "gpt"] },
   // The Vibe allowance is a subscription meter; OpenCode's Mistral API activity
   // bills the separate pay-as-you-go API budget row instead.
   [`mistral\u0000${MISTRAL_VIBE_BUDGET_ROW_KEY}`]: { unattributable: true },

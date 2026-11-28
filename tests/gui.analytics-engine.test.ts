@@ -4777,4 +4777,26 @@ describe("analytics engine: interval activity", () => {
     expect(result.intervals[0]?.entries.length).toBeGreaterThan(0);
     await engine.close();
   });
+
+  it("notifies the host when a refresh only advances the activity coverage", async () => {
+    const db = baseDb();
+    const { engine, setNow, generations } = harness(db);
+    const query = {
+      intervals: [{ startMs: NOW + HOUR, endMs: NOW + HOUR + HOUR / 2 }],
+      providerIds: ["openai"],
+    };
+    await engine.home("24h");
+    await flushAsync();
+    // The first read is answered from an index that ends before the interval,
+    // so its attribution cannot be certified.
+    setNow(NOW + 2 * HOUR);
+    expect((await engine.activity(query)).coverage).toMatchObject({ complete: false });
+    const before = generations.length;
+
+    // The scheduled refresh advances only the extent: no indexed row changes,
+    // yet coverage becomes certified, so the host must be told to re-derive.
+    await vi.waitFor(() => expect(generations.length).toBeGreaterThan(before));
+    expect((await engine.activity(query)).coverage).toEqual({ complete: true, stale: false });
+    await engine.close();
+  });
 });

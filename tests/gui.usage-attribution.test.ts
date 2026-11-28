@@ -7,6 +7,7 @@ import {
   modelEligibilityForNamedWindow,
   type UsageAttributionIntervalInput,
 } from "../src/gui/usage-attribution.js";
+import { agyBucketRowKey, type GoogleAgyQuotaBucket } from "../src/providers/google-agy.js";
 
 function costed(
   input: number,
@@ -482,15 +483,56 @@ describe("quota provider attribution scope", () => {
 
     const claudeGpt = attributionScopeForRow(
       "google-agy",
-      "named:Claude and GPT models 5h|quota:percent",
+      "named:Claude and GPT models five_hour|quota:percent",
     );
     expect(claudeGpt.isEligibleModel?.("claude-sonnet-4-5")).toBe(true);
     expect(claudeGpt.isEligibleModel?.("gpt-5")).toBe(true);
     expect(claudeGpt.isEligibleModel?.("gemini-2.5-pro")).toBe(false);
 
     expect(
-      attributionScopeForRow("google-agy", "named:Mystery Models 5h|quota:percent").known,
+      attributionScopeForRow("google-agy", "named:Mystery Models five_hour|quota:percent").known,
     ).toBe(false);
+  });
+
+  it("resolves a known scope for every row the AGY companion actually emits", () => {
+    // Built from the provider's own key function and the companion's real
+    // family/window pairs, so a key scheme change cannot leave attribution
+    // silently unmapped.
+    const emitted: Array<{
+      bucket: Pick<GoogleAgyQuotaBucket, "family" | "window">;
+      eligible: readonly string[];
+      ineligible: readonly string[];
+    }> = [
+      {
+        bucket: { family: "Gemini Models", window: "weekly" },
+        eligible: ["gemini-2.5-pro"],
+        ineligible: ["claude-sonnet-4-5", "gpt-5"],
+      },
+      {
+        bucket: { family: "Gemini Models", window: "five_hour" },
+        eligible: ["gemini-2.5-flash"],
+        ineligible: ["claude-sonnet-4-5", "gpt-5"],
+      },
+      {
+        bucket: { family: "Claude and GPT models", window: "weekly" },
+        eligible: ["claude-sonnet-4-5", "gpt-5"],
+        ineligible: ["gemini-2.5-pro"],
+      },
+      {
+        bucket: { family: "Claude and GPT models", window: "five_hour" },
+        eligible: ["claude-opus-4-1", "gpt-5-codex"],
+        ineligible: ["gemini-2.5-pro"],
+      },
+    ];
+
+    for (const { bucket, eligible, ineligible } of emitted) {
+      const rowId = `${agyBucketRowKey(bucket)}|quota:percent`;
+      const scope = attributionScopeForRow("google-agy", rowId);
+      expect(scope.known, rowId).toBe(true);
+      expect(scope.providerIds).toEqual(["google-agy", "opencode-agy-auth", "google-agy-auth"]);
+      for (const modelId of eligible) expect(scope.isEligibleModel?.(modelId), rowId).toBe(true);
+      for (const modelId of ineligible) expect(scope.isEligibleModel?.(modelId), rowId).toBe(false);
+    }
   });
 
   it("keeps Fable scoped to its family through the row table", () => {

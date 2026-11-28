@@ -962,10 +962,14 @@ function createReader(conn: SqliteConn): UsageReadStore {
         if (latest.preceding !== undefined) preceding.push(runRowToStored(latest.preceding));
         for (const run of latest.epoch) runs.push(runRowToStored(run));
         const firstAtMs = latest.epoch[0]?.first_at_ms;
-        if (firstAtMs !== undefined) {
+        // The derivation also consumes the run that opened this epoch as start
+        // evidence, so a conflict inside it is evidence about the window start:
+        // read from the earliest run handed to that derivation.
+        const evidenceFromMs = latest.preceding?.first_at_ms ?? firstAtMs;
+        if (evidenceFromMs !== undefined) {
           conflicts.push(
             ...readConflicts([row.series_id], {
-              startMs: firstAtMs,
+              startMs: evidenceFromMs,
               endMs: Number.MAX_SAFE_INTEGER,
             }),
           );
