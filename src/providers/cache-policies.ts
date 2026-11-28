@@ -287,6 +287,7 @@ export const PROVIDER_CACHE_POLICIES = {
     kind: "resolved-auth",
     resolveIdentity: () => resolveMistralVibeAuthIdentity(),
   },
+  "antigravity-cli": UNCACHED,
   xai: {
     kind: "resolved-auth",
     resolveIdentity: () => resolveXaiAuthIdentity(),

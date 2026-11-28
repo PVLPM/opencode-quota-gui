@@ -173,6 +173,14 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
       authority: "provider_reported",
     },
   ],
+  "antigravity-cli": [
+    {
+      resultType: "quota",
+      acquisitionMethod: "local_cli",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
+  ],
   zai: [
     {
       resultType: "quota",

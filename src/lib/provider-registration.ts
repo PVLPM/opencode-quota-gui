@@ -510,6 +510,21 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
     },
   },
   {
+    id: "antigravity-cli",
+    label: "Antigravity CLI",
+    // The CLI owns no OpenCode runtime id: its quota belongs to the Antigravity
+    // harness, and nothing proves it serves an OpenCode provider.
+    runtimeIds: [],
+    synonyms: ["agy", "antigravity"],
+    shape: {
+      autoSetup: "manual_env_config",
+      authentication: "local_cli_auth",
+      quota: "local_cli_report",
+      notes:
+        "Runs the installed Antigravity CLI's own /usage command (agy >= 1.1.11); no install, login or browser step",
+    },
+  },
+  {
     id: "zai",
     label: "Z.ai",
     runtimeIds: ["zai", "glm", "zai-coding-plan"],

@@ -122,6 +122,9 @@ const PROVIDER_ALIASES: Readonly<Record<string, ProviderAlias>> = {
   // The quota card's product name lives in provider registration; this alias only
   // names the extra ids a Mistral Vibe source can be recorded under.
   "mistral-vibe": { label: "Mistral Vibe", logoKey: "mistral" },
+  "antigravity-cli": { label: "Antigravity CLI", logoKey: "google" },
+  agy: { label: "Antigravity CLI", logoKey: "google" },
+  antigravity: { label: "Antigravity CLI", logoKey: "google" },
   "quota-providers": { label: "Quota providers" },
 };
 

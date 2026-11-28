@@ -117,6 +117,9 @@ const ATTRIBUTION_RUNTIME_IDS: Readonly<Record<CanonicalQuotaProviderId, readonl
   // A Mistral login's API activity bills the account's pay-as-you-go API budget,
   // never the Vibe subscription allowance (that row is unattributable below).
   mistral: ["mistral"],
+  // The Antigravity CLI has no OpenCode runtime id: its windows belong to the
+  // Antigravity harness, so no OpenCode activity is attributed to that card.
+  "antigravity-cli": [],
   xai: ["xai"],
   xiaomi: ["xiaomi", "xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp"],
   "opencode-go": ["opencode-go"],

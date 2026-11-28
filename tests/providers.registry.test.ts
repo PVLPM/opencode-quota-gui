@@ -22,6 +22,7 @@ const EXPECTED_PROVIDER_ORDER = [
   "chutes",
   "google-gemini-cli",
   "google-agy",
+  "antigravity-cli",
   "zai",
   "zhipu",
   "nanogpt",

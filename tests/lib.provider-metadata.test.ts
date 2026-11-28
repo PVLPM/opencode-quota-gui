@@ -116,6 +116,14 @@ describe("provider-metadata", () => {
         quickSetupAnchor: "google-agy-quick-setup",
       },
       {
+        id: "antigravity-cli",
+        autoSetup: "manual_env_config",
+        authentication: "local_cli_auth",
+        quota: "local_cli_report",
+        notes:
+          "Runs the installed Antigravity CLI's own /usage command (agy >= 1.1.11); no install, login or browser step",
+      },
+      {
         id: "zai",
         autoSetup: "yes",
         authentication: "opencode_auth_api_key",

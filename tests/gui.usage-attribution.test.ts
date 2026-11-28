@@ -467,6 +467,10 @@ describe("quota provider attribution scope", () => {
       known: true,
       providerIds: ["mistral"],
     });
+    // The Antigravity CLI has no OpenCode runtime id to attribute activity to.
+    expect(
+      attributionScopeForRow("antigravity-cli", "named:gemini-weekly|quota:percent").known,
+    ).toBe(false);
   });
 
   it("narrows AGY family rows to their model families and rejects unknown families", () => {
