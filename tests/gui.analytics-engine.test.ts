@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type {
   AnalyticsGroupQuery,
@@ -21,8 +24,12 @@ import {
   decodeAnalyticsState,
   encodeAnalyticsPresentation,
   encodeAnalyticsState,
+  loadAnalyticsPresentation,
+  loadAnalyticsSnapshot,
   type PersistedAnalyticsState,
   rowKey,
+  saveAnalyticsPresentation,
+  saveAnalyticsSnapshot,
   type WarmAnalyticsPresentation,
 } from "../src/gui/analytics-state.js";
 import { resolveHostTimeZone } from "../src/gui/time-zone.js";
@@ -4798,5 +4805,221 @@ describe("analytics engine: interval activity", () => {
     await vi.waitFor(() => expect(generations.length).toBeGreaterThan(before));
     expect((await engine.activity(query)).coverage).toEqual({ complete: true, stale: false });
     await engine.close();
+  });
+});
+
+describe("SQLite analytics store parity with the JSON baseline", () => {
+  type Mode = "json" | "sqlite";
+
+  function parityDb(): FakeDb {
+    const db = baseDb();
+    const extra = [
+      row("ses_root", "msg_effort", NOW - 3 * HOUR, { input: 30 }, { variant: "high" }),
+      row(
+        "ses_child",
+        "msg_missing_cache",
+        NOW - 5 * HOUR,
+        { input: 7, output: 3 },
+        { cacheReadMissing: true, cacheWriteMissing: true, cost: undefined },
+      ),
+      row("ses_other", "msg_zero", NOW - 4 * HOUR, { input: 0, output: 0 }),
+      row("ses_other", "msg_month", NOW - 20 * DAY, { input: 50 }, { modelID: "gpt-5-mini" }),
+      row("ses_other", "msg_year", NOW - 200 * DAY, { input: 60 }, { providerID: "anthropic" }),
+    ];
+    for (const entry of extra) {
+      db.rows.push(entry);
+      db.updatedAt.set(rowKey(entry.sessionID, entry.messageID), entry.completedAtMs);
+    }
+    return db;
+  }
+
+  // A no-change global refresh deliberately does not checkpoint the compact
+  // index; whether a still-pending earlier write happens to capture its newer
+  // frontier depends only on write latency. Both backends therefore let queued
+  // writes finish before the next step, so the comparison never depends on how
+  // slow the JSON file write is.
+  const inFlight = new Set<Promise<boolean>>();
+  function trackWrite(write: Promise<boolean>): Promise<boolean> {
+    inFlight.add(write);
+    void write.finally(() => inFlight.delete(write));
+    return write;
+  }
+  async function settle(): Promise<void> {
+    do {
+      await Promise.allSettled([...inFlight]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } while (inFlight.size > 0);
+  }
+
+  function engineFor(
+    mode: Mode,
+    db: FakeDb,
+    root: string,
+    clock: { value: number },
+    calls: ReaderCall[] = [],
+    indexOnly = false,
+  ) {
+    const persistence =
+      mode === "json"
+        ? {
+            loadSnapshot: loadAnalyticsSnapshot,
+            saveSnapshot: (path: string, state: AnalyticsState, savedAtMs: number) =>
+              trackWrite(saveAnalyticsSnapshot(path, state, savedAtMs)),
+            loadPresentation: loadAnalyticsPresentation,
+            savePresentation: (path: string, state: AnalyticsState, savedAtMs: number) =>
+              trackWrite(saveAnalyticsPresentation(path, state, savedAtMs)),
+          }
+        : {};
+    return createAnalyticsEngine({
+      // Index-only restarts see an unreadable source, so every DTO, including
+      // detail-only metadata such as reasoning effort, comes from the persisted
+      // occurrences rather than a corrective source read.
+      reader: createFakeReader(indexOnly ? { ...db, status: "unreadable" } : db, calls),
+      now: () => clock.value,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: join(root, "analytics-v3.json"),
+      ...persistence,
+      // Index-only restarts rebuild every DTO from the persisted occurrences.
+      ...(indexOnly
+        ? { loadPresentation: async () => undefined, savePresentation: async () => true }
+        : {}),
+    });
+  }
+
+  async function views(engine: ReturnType<typeof createAnalyticsEngine>) {
+    const homes = [];
+    for (const range of ["24h", "7d", "30d", "lifetime"] as const) {
+      homes.push(await engine.home(range));
+    }
+    const projects = [];
+    for (const projectId of ["p1", "p2"]) {
+      for (const range of ["7d", "lifetime"] as const) {
+        projects.push(await engine.project(projectId, range));
+      }
+    }
+    const sessions = [];
+    for (const sessionId of ["ses_root", "ses_child", "ses_other"]) {
+      sessions.push(await engine.session(sessionId));
+    }
+    const groups = [];
+    for (const dimension of ["model", "provider"] as const) {
+      groups.push(await engine.groups({ range: "lifetime", dimension }));
+    }
+    const activity = await engine.activity({
+      intervals: [
+        { startMs: NOW - 6 * HOUR, endMs: NOW },
+        { startMs: NOW - 30 * DAY, endMs: NOW - 10 * DAY },
+      ],
+      providerIds: ["openai", "anthropic"],
+    });
+    return { homes, projects, sessions, groups, activity };
+  }
+
+  /** One shared history: revisions, removals, fork copies, a source replacement. */
+  async function scenario(mode: Mode, root: string) {
+    const db = parityDb();
+    const clock = { value: NOW };
+    const observed: unknown[] = [];
+
+    const first = engineFor(mode, db, root, clock);
+    await views(first);
+    await settle();
+    // New activity, an in-place revision, a removal and a changed effort.
+    const added = row("ses_root", "msg_new", NOW + 5 * 60_000, { input: 11 });
+    db.rows.push(added);
+    db.updatedAt.set(rowKey(added.sessionID, added.messageID), NOW + 5 * 60_000);
+    const revisedIndex = db.rows.findIndex((entry) => entry.messageID === "msg_b");
+    const revised = db.rows[revisedIndex];
+    if (!revised) throw new Error("expected msg_b");
+    db.rows[revisedIndex] = { ...revised, tokens: { ...revised.tokens, output: 77 } };
+    db.updatedAt.set(rowKey("ses_root", "msg_b"), NOW + 6 * 60_000);
+    db.rows = db.rows.filter((entry) => entry.messageID !== "msg_o");
+    const effortIndex = db.rows.findIndex((entry) => entry.messageID === "msg_effort");
+    const effort = db.rows[effortIndex];
+    if (!effort) throw new Error("expected msg_effort");
+    db.rows[effortIndex] = { ...effort, variant: "low" };
+    db.updatedAt.set(rowKey("ses_root", "msg_effort"), NOW + 7 * 60_000);
+    clock.value = NOW + INTERVAL + 10 * 60_000;
+    await first.refresh();
+    observed.push(await views(first));
+    await first.close();
+
+    // Restart on the persisted index.
+    clock.value += 60_000;
+    const second = engineFor(mode, db, root, clock);
+    observed.push(await views(second));
+    await settle();
+    await second.refresh();
+    observed.push(await views(second));
+    await second.close();
+    const indexOnly = engineFor(mode, db, root, clock, [], true);
+    observed.push(await views(indexOnly));
+    await indexOnly.close();
+
+    // Source database replacement: a different file with different history.
+    db.identity = identity({ inode: "999" });
+    db.rows = db.rows.filter((entry) => entry.sessionID !== "ses_other");
+    clock.value += INTERVAL + 60_000;
+    const third = engineFor(mode, db, root, clock);
+    await third.refresh();
+    observed.push(await views(third));
+    await third.close();
+    clock.value += 60_000;
+    const fourth = engineFor(mode, db, root, clock);
+    observed.push(await views(fourth));
+    await fourth.close();
+    const fifth = engineFor(mode, db, root, clock, [], true);
+    observed.push(await views(fifth));
+    await fifth.close();
+    return observed;
+  }
+
+  it("serves identical Home, Project, Session, group and activity results across restarts", async () => {
+    const jsonRoot = mkdtempSync(join(tmpdir(), "ocq-parity-json-"));
+    const sqliteRoot = mkdtempSync(join(tmpdir(), "ocq-parity-sqlite-"));
+    try {
+      const json = await scenario("json", jsonRoot);
+      const sqlite = await scenario("sqlite", sqliteRoot);
+      expect(sqlite).toEqual(json);
+      expect(existsSync(join(sqliteRoot, "analytics.sqlite"))).toBe(true);
+      expect(existsSync(join(sqliteRoot, "analytics-v3.json"))).toBe(false);
+      expect(existsSync(join(jsonRoot, "analytics.sqlite"))).toBe(false);
+    } finally {
+      rmSync(jsonRoot, { recursive: true, force: true });
+      rmSync(sqliteRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("restarts from a migrated JSON index with identical results and no full source projection", async () => {
+    const legacyRoot = mkdtempSync(join(tmpdir(), "ocq-parity-migrate-"));
+    const referenceRoot = mkdtempSync(join(tmpdir(), "ocq-parity-reference-"));
+    try {
+      const prime = async (root: string) => {
+        const clock = { value: NOW };
+        const engine = engineFor("json", parityDb(), root, clock);
+        await views(engine);
+        await engine.close();
+      };
+      await prime(legacyRoot);
+      await prime(referenceRoot);
+      expect(existsSync(join(legacyRoot, "analytics-v3.json"))).toBe(true);
+
+      const calls: ReaderCall[] = [];
+      const migrated = engineFor("sqlite", parityDb(), legacyRoot, { value: NOW + 60_000 }, calls);
+      const after = await views(migrated);
+      await migrated.close();
+      const reference = engineFor("json", parityDb(), referenceRoot, { value: NOW + 60_000 });
+      const expected = await views(reference);
+      await reference.close();
+
+      expect(after).toEqual(expected);
+      expect(fullReads(calls)).toEqual([]);
+      expect(existsSync(join(legacyRoot, "analytics-v3.json"))).toBe(false);
+      expect(existsSync(join(legacyRoot, "analytics-v3.json.presentation.json"))).toBe(false);
+      expect(existsSync(join(legacyRoot, "analytics.sqlite"))).toBe(true);
+    } finally {
+      rmSync(legacyRoot, { recursive: true, force: true });
+      rmSync(referenceRoot, { recursive: true, force: true });
+    }
   });
 });
