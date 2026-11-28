@@ -3633,17 +3633,17 @@
   gap: 12px;
 }
 
-/* One view-level caveat trigger, seated at the end of the first account header
-   so it never costs a row of its own. */
+/* One view-level caveat trigger, always visible because it is the only legend.
+   It reuses the Quota card's own action size and radius, so both card headers
+   carry the same control family. */
 .qg-usage-info {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  align-self: center;
-  width: 24px;
-  height: 24px;
-  margin-left: auto;
-  border-radius: var(--qg-radius);
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: -5px -5px -5px 0;
+  border-radius: 4px;
   color: var(--qg-text-muted);
   cursor: help;
 }
@@ -3665,7 +3665,7 @@
 }
 
 .qg-usage-caveats {
-  max-width: 300px;
+  max-width: 340px;
   font-size: var(--font-size-small);
   line-height: 1.45;
 }
@@ -3699,13 +3699,12 @@
   min-width: 0;
 }
 
-/* The Quota card header supplies identity layout; the heading resets its h2
-   defaults so provider, plan and account read as one line. */
+/* The Quota card header supplies identity layout; the heading only resets its
+   h2 defaults, so provider, plan and account keep the card's own line height. */
 .qg-usage-account__title {
   margin: 0;
   font: inherit;
   font-weight: var(--font-weight-medium);
-  line-height: 1.3;
 }
 
 .qg-usage-account__empty {

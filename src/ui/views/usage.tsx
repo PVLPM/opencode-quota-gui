@@ -7,6 +7,7 @@ import { EmptyNotice, Skeleton } from "../components/states";
 import { UsageAccountCard } from "../components/usage-account";
 import { UsageImportedSection } from "../components/usage-imported";
 import { Icon, Tooltip } from "../opencode-ui";
+import { ATTRIBUTION_DISCLOSURE } from "../usage-model";
 import { usageRunwayIndex } from "../usage-runway";
 
 /** The view's one caveat trigger; it seats in the first account header. */
@@ -16,13 +17,9 @@ function UsageInfo(): JSX.Element {
       class="qg-usage-info"
       value={
         <span class="qg-usage-caveats__body">
-          <span>Observed lines are provider readings; dashed connectors are gaps.</span>
-          <span>Change compares measured endpoints.</span>
-          <span>
-            Est. is the share attributed to recorded OpenCode activity; usage outside OpenCode is
-            not excluded.
-          </span>
-          <span>An amber dashed line is the quota card's projected runway, when available.</span>
+          <span>Dashed grey is a monitoring gap.</span>
+          <span>Amber dashes are the quota card's projected runway.</span>
+          <span>{ATTRIBUTION_DISCLOSURE}</span>
         </span>
       }
       triggerTabIndex={0}
