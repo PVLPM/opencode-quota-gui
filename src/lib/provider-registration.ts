@@ -702,7 +702,7 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
     shape: {
       autoSetup: "usually",
       authentication: "external_api_key",
-      authFallbacks: ["env_api_key", "global_opencode_config"],
+      authFallbacks: ["env_api_key"],
       quota: "remote_api",
       optionalVisibilityRows: [
         {

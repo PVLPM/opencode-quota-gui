@@ -20,6 +20,7 @@ import {
   resolveMistralVibeCredentials,
 } from "../src/lib/mistral-vibe-auth.js";
 import type { CredentialRow } from "../src/lib/opencode-auth.js";
+import { QUOTA_PROVIDER_REGISTRATION_SOURCE } from "../src/lib/provider-registration.js";
 
 const temporaryRoots: string[] = [];
 
@@ -245,5 +246,25 @@ describe("Mistral Vibe credential discovery", () => {
       identityKeys: resolution.credentials.map((credential) => credential.identityKey),
     });
     expect(serialized).not.toContain("secret-value-that-must-not-leak");
+  });
+
+  it("declares only the credential sources the resolver actually reads", async () => {
+    const mistral = QUOTA_PROVIDER_REGISTRATION_SOURCE.find((entry) => entry.id === "mistral");
+    expect(mistral?.shape.authFallbacks).toEqual(["env_api_key"]);
+
+    // The resolver reads the environment variable, the Vibe dotenv and
+    // OpenCode's stored Mistral logins, and nothing else: the registration must
+    // not advertise a source this resolver never reads.
+    const vibeHome = await makeRoot();
+    await writeDotenv(vibeHome, "MISTRAL_API_KEY=dotenv-key\n");
+    const resolution = await resolveMistralVibeCredentials({
+      env: { VIBE_HOME: vibeHome, MISTRAL_API_KEY: "env-key" },
+      readStoredRows: async () => [storedRow()],
+    });
+    expect(resolution.credentials.map((credential) => credential.source)).toEqual([
+      "env",
+      "vibe_dotenv",
+      "opencode.db",
+    ]);
   });
 });
