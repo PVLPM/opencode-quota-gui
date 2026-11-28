@@ -184,15 +184,29 @@ only when A is the **only** account of P with observations overlapping the
 interval. Multiple concurrent accounts → `ambiguous-account`. External use of
 the same subscription can never be excluded; the UI always discloses this.
 
-D8.1 implementation note: "sole" is decided from positive evidence only. An
-interval is eligible for account A when no other account of the same provider is
-configured right now (the live card list, because the store keeps no
-configuration timestamps) and no other account has a recorded span overlapping
-the interval — either a successful run or a recorded `error` / `cooldown` /
-`retained` cycle, which proves the card was in the collector snapshot while
-producing no sample. `missing-row` is not presence evidence: the store also
-emits it for a card that left the snapshot. A rival that was removed and has no
-overlapping recorded span therefore leaves the interval attributable.
+D8.1 implementation note: "sole" is decided from positive evidence only, and
+that evidence is a **presence span** per rival card. A rival's span runs from
+its earliest recorded evidence — a successful run or a recorded `error` /
+`cooldown` / `retained` cycle, which proves the card was in the collector
+snapshot while producing no sample — through its latest. `missing-row` is not
+presence evidence: the store also emits it for a card that left the snapshot.
+An interval of A is ambiguous iff it overlaps any rival span; history strictly
+before a rival's first evidence predates its configuration, because the
+collector records every configured account each cycle as either a success or an
+interruption, so A may still be sole there. A rival in the live card list is
+configured right now, so its span keeps an open end and covers every later
+interval. A live rival with no recorded evidence at all (first cycle pending)
+has no known start; it is treated as present only for the newest interval, never
+for the whole history, because the store keeps no configuration timestamps.
+
+Recorded for owner review: gaps inside a span stay conservative — a
+card removed and re-added is treated as present in between, never as two spans.
+The store read is one aggregate over `usage_series` bounds and
+`usage_interruptions` (both run-length compressed), so it is proportional to
+cards × windows, not to polls; `queryLatestEpochs` returns it too, which is how
+a rival that only ever failed becomes visible in the `current` range. Residual
+risk: a card observed in a cycle with no measurement mark and no error records
+nothing, so its first evidence can lag its configuration by those cycles.
 
 ### D9 Effort
 Promote `variant` onto `OwnedStep`: absent ⇒ unknown; `"default"` kept

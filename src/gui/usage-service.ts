@@ -51,9 +51,8 @@ import {
   openUsageStoreReadOnly,
   USAGE_IMPORT_PROVIDER_IDS,
   type UsageHistorySlice,
-  type UsageInterruptionKind,
+  type UsagePresenceSpan,
   type UsageReadStore,
-  type UsageRivalRun,
   type UsageSeriesInfo,
   type UsageStoredRun,
 } from "../lib/usage-store.js";
@@ -87,17 +86,6 @@ const IMPORTED_HARNESS_BY_PROVIDER: Readonly<Record<string, "claude-code" | "cod
   [USAGE_IMPORT_PROVIDER_IDS.codex]: "codex",
 };
 
-/**
- * Interruption kinds that prove a card was part of the collector's snapshot
- * while producing no sample (D5). `missing-row` is excluded: the store also
- * emits it when a card leaves the snapshot, so it is never presence evidence.
- */
-const PRESENCE_INTERRUPTION_KINDS: ReadonlySet<UsageInterruptionKind> = new Set([
-  "error",
-  "cooldown",
-  "retained",
-]);
-
 const ZERO_TOKENS: CostedTokens = {
   input: 0,
   output: 0,
@@ -118,6 +106,7 @@ const EMPTY_SLICE: UsageHistorySlice = {
   preceding: [],
   interruptions: [],
   conflicts: [],
+  presenceSpans: [],
 };
 
 export interface UsageSnapshotBuilderOptions {
@@ -170,15 +159,16 @@ interface WorkingAccount {
   accountLabel?: string;
   source: UsageSource;
   windows: WorkingWindow[];
-  /** Other accounts' runs of the same provider, sorted for D8 overlap checks. */
+  /** Rival presence spans of the same provider, sorted for D8 overlap checks. */
   rivalFirstAtMs: number[];
-  /** Prefix maximum of `lastAtMs`; a long earlier run still covers an interval. */
+  /** Prefix maximum of `lastAtMs`; a long earlier span still covers an interval. */
   rivalMaxLastAtMs: number[];
   /**
-   * Another account of the same provider is configured right now. The store
-   * records no configuration time, so it could have served traffic then.
+   * A rival is configured right now but has recorded no evidence yet: the first
+   * collector cycle has not run. Its configuration time is unknown, so only the
+   * newest interval can be affected.
    */
-  configuredRival: boolean;
+  liveRivalWithoutEvidence: boolean;
 }
 
 interface ProviderActivity {
@@ -490,11 +480,13 @@ function lastStartingAtOrBefore(times: readonly number[], timeMs: number): numbe
 function soleObservedAccount(
   account: WorkingAccount,
   interval: { startMs: number; endMs: number },
+  newest: boolean,
 ): boolean {
-  // A configured second account defeats the "sole account" claim regardless of
-  // its measurements: OpenCode records no per-message account, so routing to it
-  // cannot be excluded (D8).
-  if (account.configuredRival) return false;
+  // A rival configured right now with no recorded evidence yet has no known
+  // start, so it can only have served the newest interval (D8.1).
+  if (account.liveRivalWithoutEvidence && newest) return false;
+  // Any other rival is present exactly over its recorded span: OpenCode records
+  // no per-message account, so an overlapping span cannot be excluded (D8).
   const index = lastStartingAtOrBefore(account.rivalFirstAtMs, interval.endMs);
   return index < 0 || (account.rivalMaxLastAtMs[index] ?? 0) < interval.startMs;
 }
@@ -618,59 +610,53 @@ export function createUsageSnapshotBuilder(
     const cardRank = new Map<string, number>(
       cards.map((card, index) => [card.cardId, index] as const),
     );
-    // Rival evidence may only come from other cards of the same provider. For
-    // `current`, `rivalRuns` also carries older rival epochs that the displayed
-    // latest-epoch slice omits but which still overlap the displayed interval.
-    const seriesById = new Map(slice.series.map((series) => [series.rowId, series] as const));
-    // Imported quota series are not OpenCode accounts: they must never become
-    // rival coverage for a live provider or receive OpenCode activity.
-    const importedCardIds = new Set(
-      slice.series
-        .filter((series) => series.source === "codex-import")
-        .map((series) => series.cardId),
-    );
-    const rivalRunsByProvider = new Map<string, UsageRivalRun[]>();
-    const addRivalRun = (run: UsageRivalRun): void => {
-      if (importedCardIds.has(run.cardId)) return;
-      const list = rivalRunsByProvider.get(run.providerId);
-      if (list === undefined) rivalRunsByProvider.set(run.providerId, [run]);
-      else list.push(run);
-    };
-    if (slice.rivalRuns !== undefined) {
-      for (const run of slice.rivalRuns) addRivalRun(run);
-    } else {
-      for (const run of slice.runs) {
-        const series = seriesById.get(run.seriesId);
-        if (series === undefined) continue;
-        addRivalRun({
-          cardId: series.cardId,
-          providerId: series.providerId,
-          firstAtMs: run.firstAtMs,
-          lastAtMs: run.lastAtMs,
-        });
-      }
-    }
-    // A recorded failure/cooldown/retained cycle is presence evidence too: the
-    // card belonged to the collector's snapshot while it produced no sample, so
-    // the account could have served traffic in that span.
-    for (const interruption of slice.interruptions) {
-      if (!PRESENCE_INTERRUPTION_KINDS.has(interruption.kind)) continue;
-      addRivalRun({
-        cardId: interruption.cardId,
-        providerId: interruption.providerId,
-        firstAtMs: interruption.firstAtMs,
-        lastAtMs: interruption.lastAtMs,
-      });
+    // Rival presence (D8) comes from the store's per-card aggregate: a card's
+    // span runs from its earliest recorded evidence (a successful sample or a
+    // failed/cooldown/retained attempt) through its latest. A card that left the
+    // snapshot ends at its last evidence; a card in the live list is configured
+    // right now, so its span stays open. Gaps inside a span stay
+    // conservative: a card removed and re-added is treated as present in
+    // between. Imported quota series are excluded by the store query.
+    const presenceByProvider = new Map<string, UsagePresenceSpan[]>();
+    for (const span of slice.presenceSpans) {
+      const list = presenceByProvider.get(span.providerId);
+      if (list === undefined) presenceByProvider.set(span.providerId, [span]);
+      else list.push(span);
     }
     // Accounts the collector knows about right now. Presence in the live cards
-    // proves configuration; the store keeps no configuration timestamps, so a
-    // configured rival may have been in use during any interval.
+    // proves configuration, including a card whose first cycle has not been
+    // recorded yet.
     const configuredCardIdsByProvider = new Map<string, Set<string>>();
     for (const card of cards) {
       const ids = configuredCardIdsByProvider.get(card.providerId);
       if (ids === undefined)
         configuredCardIdsByProvider.set(card.providerId, new Set([card.cardId]));
       else ids.add(card.cardId);
+    }
+
+    /** Rival presence spans of one provider, this account excluded. */
+    function rivalPresence(
+      providerId: string,
+      cardId: string,
+    ): { spans: { firstAtMs: number; lastAtMs: number }[]; liveWithoutEvidence: boolean } {
+      const live = configuredCardIdsByProvider.get(providerId);
+      const spans: { firstAtMs: number; lastAtMs: number }[] = [];
+      const recorded = new Set<string>();
+      for (const span of presenceByProvider.get(providerId) ?? []) {
+        if (span.cardId === cardId) continue;
+        recorded.add(span.cardId);
+        spans.push({
+          firstAtMs: span.firstAtMs,
+          // Still configured: present from its first evidence onward, so the
+          // span stays open rather than stopping at the read time.
+          lastAtMs: live?.has(span.cardId) === true ? Number.POSITIVE_INFINITY : span.lastAtMs,
+        });
+      }
+      // A configured rival that has recorded nothing yet is present from this
+      // read onward only: the store keeps no configuration time.
+      const liveWithoutEvidence =
+        live !== undefined && [...live].some((other) => other !== cardId && !recorded.has(other));
+      return { spans, liveWithoutEvidence };
     }
 
     groups.sort((left, right) => {
@@ -695,18 +681,9 @@ export function createUsageSnapshotBuilder(
       const imported = group.source === "codex-import";
       const card = cardById.get(group.cardId);
       const providerLabel = card?.providerLabel ?? group.providerLabel;
-      const rivals = imported
-        ? rivalCoverage([])
-        : rivalCoverage(
-            (rivalRunsByProvider.get(group.providerId) ?? []).filter(
-              (other) => other.cardId !== group.cardId,
-            ),
-          );
-      const configuredRival =
-        !imported &&
-        [...(configuredCardIdsByProvider.get(group.providerId) ?? [])].some(
-          (cardId) => cardId !== group.cardId,
-        );
+      const rival = imported
+        ? { spans: [], liveWithoutEvidence: false }
+        : rivalPresence(group.providerId, group.cardId);
       const account: WorkingAccount = {
         cardId: group.cardId,
         providerId: group.providerId,
@@ -721,8 +698,8 @@ export function createUsageSnapshotBuilder(
         ...(card?.planLabel !== undefined ? { planLabel: card.planLabel } : {}),
         source: group.source,
         windows: [],
-        ...rivals,
-        configuredRival,
+        ...rivalCoverage(rival.spans),
+        liveRivalWithoutEvidence: rival.liveWithoutEvidence,
       };
 
       for (const plan of orderPlans(group.plans, card)) {
@@ -840,15 +817,18 @@ export function createUsageSnapshotBuilder(
       for (const window of account.windows) {
         const providerIds = window.scope.known ? window.scope.providerIds : [];
         const isEligibleModel = window.scope.isEligibleModel;
-        const intervals: UsageAttributionIntervalInput[] = window.window.intervals.map(
-          (interval) => ({
-            startMs: interval.startMs,
-            endMs: interval.endMs,
-            burnPercentPoints: interval.burnPercentPoints,
-            link: interval.link,
-            soleObservedAccount: soleObservedAccount(account, interval),
-          }),
-        );
+        const drawn = window.window.intervals;
+        const intervals: UsageAttributionIntervalInput[] = drawn.map((interval, position) => ({
+          startMs: interval.startMs,
+          endMs: interval.endMs,
+          burnPercentPoints: interval.burnPercentPoints,
+          link: interval.link,
+          soleObservedAccount: soleObservedAccount(
+            account,
+            interval,
+            position === drawn.length - 1,
+          ),
+        }));
         const result = attributeUsageWindow({
           intervals,
           activity: window.window.intervals.map((interval) =>
