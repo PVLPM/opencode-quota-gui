@@ -4320,6 +4320,8 @@ describe("range transitions name the range still on screen", () => {
 
   interface AppHarness {
     root: TestNode;
+    /** The page's location, so a reload can re-mount against the same URL. */
+    browser: ReturnType<typeof historyBrowser>;
     navigate: (path: string) => Promise<void>;
     path: () => string;
     text: () => string;
@@ -4335,6 +4337,8 @@ describe("range transitions name the range still on screen", () => {
    */
   function mountApp(options: {
     path: string;
+    /** Reused across a simulated reload: the page keeps its URL and storage. */
+    browser?: ReturnType<typeof historyBrowser>;
     home?: DashboardClient["home"];
     groups?: DashboardClient["groups"];
     project?: DashboardClient["project"];
@@ -4344,7 +4348,7 @@ describe("range transitions name the range still on screen", () => {
     usage?: DashboardClient["usage"];
     subscribe?: DashboardClient["subscribe"];
   }): AppHarness {
-    const browser = historyBrowser(options.path);
+    const browser = options.browser ?? historyBrowser(options.path);
     vi.stubGlobal("window", browser);
 
     const client: DashboardClient = {
@@ -4390,6 +4394,7 @@ describe("range transitions name the range still on screen", () => {
     const stop = renderGraph.mount(() => renderGraph.app({ client }), root);
     return {
       root,
+      browser,
       navigate: async (path) => {
         browser.follow(path);
         await settle();
@@ -4457,6 +4462,48 @@ describe("range transitions name the range still on screen", () => {
       expect(usageReads).toBeGreaterThan(readsBefore);
     } finally {
       app.dispose();
+    }
+  });
+
+  it("reopens the Usage tab after a reload instead of falling back to Quota", async () => {
+    const activeTab = (root: TestNode): string | undefined => {
+      const nav = renderGraph
+        .elementsNamed(root, "nav")
+        .find((node) => String(node.props.class ?? "").includes("qg-analytics-tabs"));
+      if (nav === undefined) return undefined;
+      const link = renderGraph
+        .elementsNamed(nav, "a")
+        .find((node) => node.props["aria-current"] === "page");
+      return link === undefined ? undefined : String(link.props.href);
+    };
+
+    const before = mountApp({ path: "/quota" });
+    let page: ReturnType<typeof historyBrowser>;
+    try {
+      await settle();
+      expect(activeTab(before.root)).toBe("/quota");
+      await before.navigate("/usage?range=lifetime");
+      expect(before.path()).toBe("/usage?range=lifetime");
+      expect(activeTab(before.root)).toBe("/usage?range=lifetime");
+      page = before.browser;
+    } finally {
+      before.dispose();
+    }
+
+    // A reload keeps the page's URL and mounts a brand-new shell against it.
+    const reloaded = mountApp({
+      path: page.location.pathname + page.location.search,
+      browser: page,
+    });
+    try {
+      await settle();
+
+      // The selected tab is derived from the location, never reset to Quota.
+      expect(reloaded.path()).toBe("/usage?range=lifetime");
+      expect(activeTab(reloaded.root)).toBe("/usage?range=lifetime");
+      expect(reloaded.text()).toContain("5h limit");
+    } finally {
+      reloaded.dispose();
     }
   });
 

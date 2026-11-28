@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { UsagePoint } from "../src/contracts/usage.js";
 import { usageRunwayIndex, usageRunwayKey, usageRunwayProjection } from "../src/ui/usage-runway.js";
@@ -12,6 +13,14 @@ import { HOUR_MS, NOW, percentRow, providerCard } from "./fixtures/gui-ui-fixtur
 const CARD_ID = "usage-card";
 const ROW_ID = "usage-row";
 
+/** Freezes every nested object, so any write to the loaded payload throws. */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const nested of Object.values(value)) deepFreeze(nested);
+    Object.freeze(value);
+  }
+  return value;
+}
 function lastPoint(endMs: number, remainingPercent = 40): UsagePoint {
   return {
     startMs: endMs - 60_000,
@@ -138,5 +147,34 @@ describe("usage runway hints", () => {
         nowMs: NOW,
       }),
     ).toBeUndefined();
+  });
+
+  it("derives its hint without writing to the loaded card", () => {
+    const row = percentRow({
+      rowId: ROW_ID as never,
+      resetAtIso: new Date(NOW + 3 * HOUR_MS).toISOString(),
+      runway: { kind: "before_reset", projectedAtIso: new Date(NOW + 2 * HOUR_MS).toISOString() },
+    });
+    const card = deepFreeze(providerCard({ cardId: CARD_ID as never, rows: [row] }));
+
+    // A frozen card proves the projection only reads: any annotation would throw.
+    const index = usageRunwayIndex([card]);
+
+    expect(index.size).toBe(1);
+    expect(index.get(usageRunwayKey(CARD_ID, ROW_ID))).not.toBe(row.runway);
+    expect(row.runway).toEqual({
+      kind: "before_reset",
+      projectedAtIso: new Date(NOW + 2 * HOUR_MS).toISOString(),
+    });
+  });
+
+  it("stays presentation-only: the module imports types and nothing that stores", () => {
+    const source = readFileSync(new URL("../src/ui/usage-runway.ts", import.meta.url), "utf8");
+
+    // No value import means no store, no RPC and no persistence module here.
+    expect(source).not.toMatch(/^import\s+(?!type\b)/mu);
+    for (const token of ["localStorage", "saveSettings", "rpc", "store"]) {
+      expect(source, token).not.toContain(token);
+    }
   });
 });

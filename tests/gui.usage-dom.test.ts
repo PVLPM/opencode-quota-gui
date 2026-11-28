@@ -160,6 +160,55 @@ describe("Usage view DOM", () => {
     dispose();
   });
 
+  it("snaps the crosshair onto the latest dot, even from a pointer past it", async () => {
+    const { target, dispose } = mount("remaining");
+    const window = target.querySelector<HTMLElement>(".qg-usage-window");
+    const surface = window?.querySelector<HTMLElement>(".qg-chart__surface");
+    const latest = window?.querySelector(".qg-usage-chart__latest");
+    // The top grid line spans the plot, so the axis labels stay the only gutter.
+    const grid = window?.querySelector(".qg-chart__grid-line");
+    const plotLeft = Number(grid?.getAttribute("x1"));
+    const plotRight = Number(grid?.getAttribute("x2"));
+    const dotX = Number(latest?.getAttribute("cx"));
+    expect(Number.isFinite(dotX)).toBe(true);
+
+    if (surface) {
+      // happy-dom has no layout: give the surface the plot's own box.
+      surface.getBoundingClientRect = () => ({
+        left: 0,
+        top: 0,
+        right: plotRight - plotLeft,
+        bottom: 100,
+        width: plotRight - plotLeft,
+        height: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+      // The pointer sits just past the newest reading: the nearest inspectable
+      // anchor is still that reading, so the crosshair lands on its dot.
+      surface.dispatchEvent(
+        new PointerEvent("pointermove", { clientX: dotX - plotLeft + 6, bubbles: true }),
+      );
+    }
+    await Promise.resolve();
+
+    const cursor = window?.querySelector(".qg-chart__cursor");
+    const active = window?.querySelector(".qg-usage-chart__active-point");
+    expect(cursor?.getAttribute("x1")).toBe(latest?.getAttribute("cx"));
+    expect(active?.getAttribute("cx")).toBe(latest?.getAttribute("cx"));
+    expect(active?.getAttribute("cy")).toBe(latest?.getAttribute("cy"));
+
+    // The keyboard reaches the same dot: End is the last measured instant.
+    surface?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    await Promise.resolve();
+    expect(window?.querySelector(".qg-chart__cursor")?.getAttribute("x1")).toBe(
+      latest?.getAttribute("cx"),
+    );
+
+    dispose();
+  });
+
   it("shows a short reset reason, including when the provider time is unknown", async () => {
     const { target, dispose } = mount("remaining");
     const surfaces = target.querySelectorAll<HTMLElement>(".qg-chart__surface");
