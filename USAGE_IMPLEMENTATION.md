@@ -17,7 +17,7 @@ Branch `feat/v1.4.0`, base `main@8c0aad2e` (v1.3.3).
 | C | Effort on owned steps + interval activity query + attribution | done: certified activity coverage, presence-span account eligibility (D8.1), uncertain reset boundaries (D4) |
 | D | Claude Code / Codex opt-in import + dedupe | done: parsers/readers, settings, schema v3, scheduling, exclusions, activity query, per-session unknown Codex accounts, per-harness delete (D10.3) |
 | E | Usage navigation, charts, inspection, breakdown (browser + native) | done: redesign against owner feedback (shared frame tabs, compact plot, account meta) |
-| F | Integration, benchmarks, review, screenshots, draft PR | in progress: integrated, verified, reviews running; draft PR #41 |
+| F | Integration, benchmarks, review, screenshots, draft PR | done: Oracle + security reviews fixed, integrated verify, responsive screenshots; draft PR #41 awaiting external acceptance |
 | G | New providers: Mistral Vibe, Antigravity CLI | done (see capability matrix) |
 
 ## Investigation findings (summary)
@@ -449,3 +449,17 @@ imported in v1.4.0 (deferred, below).
 - Budget-with-reset history, orphaned analytics temp cleanup, and per-harness
   delete of imported history merged; integrated `pnpm verify` and Windows
   platform suite run on `feat/v1.4.0`.
+- Review round (Oracle architecture + security, both fix-first) resolved:
+  coverage changes now notify and re-derive an open Usage page; attribution
+  requires certified coverage; preceding-run conflicts keep the current axis
+  off an exact reset; AGY five-hour attribution keys match `five_hour`; a
+  per-harness `import_generation` fence stops another process from restoring
+  deleted imports; Antigravity CLI errors are fixed messages, relative PATH
+  entries are skipped and symlinked binaries resolve; Mistral keys are
+  syntax-checked, transport errors are fixed messages, diagnostics carry no
+  paths, redirects are refused, dotenv parsing is last-assignment-wins, and the
+  registration lists only the credential sources actually read.
+- Deferred hardening: a per-install HMAC for the Mistral credential identity
+  (needs a card-id migration); pre-fix development databases may hold a shared
+  `codex-import:unknown` series without thread provenance (no released build
+  wrote it).
