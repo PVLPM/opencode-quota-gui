@@ -167,7 +167,8 @@ function parseOptions(argv) {
     } else if (argument === "--json-out") {
       const value = argv[index + 1];
       index += 1;
-      if (!value) throw new BenchError("bad-argument");
+      // A report path can never name a database or its journal files.
+      if (!value || !value.endsWith(".json")) throw new BenchError("bad-argument");
       options.jsonOut = value;
     } else if (argument === "--dist-root") {
       // A directory holding another build's `dist/` (e.g. a baseline copy), so

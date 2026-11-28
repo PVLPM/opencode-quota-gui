@@ -20,7 +20,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -59,6 +59,15 @@ function parse(argv) {
   if (!Number.isInteger(options.runs) || options.runs < 1) throw new Error("bad --runs");
   if (options.runtime !== "bun" && options.runtime !== "node") throw new Error("bad --runtime");
   options.out ??= join(repoRoot, "docs/performance/local/runs", `ab-${Date.now()}`);
+  // Results stay in the gitignored local folder, and labels become filenames.
+  const fromLocal = relative(join(repoRoot, "docs/performance/local"), options.out);
+  if (fromLocal.startsWith("..") || isAbsolute(fromLocal)) {
+    throw new Error("--out must be inside docs/performance/local");
+  }
+  for (const label of [options.aLabel, options.bLabel]) {
+    if (!/^[A-Za-z0-9._-]{1,40}$/.test(label)) throw new Error(`bad label ${label}`);
+  }
+  if (options.aLabel === options.bLabel) throw new Error("labels must differ");
   return options;
 }
 
